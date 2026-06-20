@@ -1,0 +1,133 @@
+openapi: 3.1.0
+info:
+  title: DenDenMushi Incident Agent API
+  version: 0.1.0
+  description: Incident review web endpoints. Responses are HTML except for health and this spec.
+servers:
+  - url: http://localhost:8085
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Service is running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /incidents:
+    get:
+      summary: List incident review pages
+      security:
+        - albCognito: []
+      responses:
+        "200":
+          description: HTML incident list.
+          content:
+            text/html:
+              schema:
+                type: string
+        "401":
+          description: Missing or invalid Cognito identity.
+          content:
+            text/plain:
+              schema:
+                type: string
+  /incidents/{incidentId}:
+    get:
+      summary: Show incident detail and approval form
+      security:
+        - albCognito: []
+      parameters:
+        - $ref: "#/components/parameters/IncidentId"
+      responses:
+        "200":
+          description: HTML incident detail.
+          content:
+            text/html:
+              schema:
+                type: string
+        "401":
+          description: Missing or invalid Cognito identity.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Incident not found.
+          content:
+            text/plain:
+              schema:
+                type: string
+  /incidents/{incidentId}/approve:
+    post:
+      summary: Approve the exact proposed incident plan
+      security:
+        - albCognito: []
+      parameters:
+        - $ref: "#/components/parameters/IncidentId"
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/DecisionForm"
+      responses:
+        "303":
+          description: Redirects to the incident detail page.
+        "400":
+          description: Identity or plan hash missing.
+        "403":
+          description: Cross-site decision rejected.
+        "409":
+          description: Incident changed; reload before deciding.
+  /incidents/{incidentId}/reject:
+    post:
+      summary: Reject the exact proposed incident plan
+      security:
+        - albCognito: []
+      parameters:
+        - $ref: "#/components/parameters/IncidentId"
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/DecisionForm"
+      responses:
+        "303":
+          description: Redirects to the incident detail page.
+        "400":
+          description: Identity or plan hash missing.
+        "403":
+          description: Cross-site decision rejected.
+        "409":
+          description: Incident changed; reload before deciding.
+components:
+  securitySchemes:
+    albCognito:
+      type: apiKey
+      in: header
+      name: x-amzn-oidc-data
+  parameters:
+    IncidentId:
+      name: incidentId
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+    DecisionForm:
+      type: object
+      required: [planHash]
+      properties:
+        planHash:
+          type: string

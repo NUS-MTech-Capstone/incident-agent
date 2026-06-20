@@ -53,3 +53,12 @@ POST /incidents/{incidentId}/reject
 
 The incident routes trust Cognito identity headers supplied by the authenticated
 ALB boundary and must not be exposed through an unauthenticated ingress.
+
+## API Specification
+
+The OpenAPI contract is checked in at `api/openapi.yaml` and is served
+unauthenticated at:
+
+```http
+GET /openapi.yaml
+```

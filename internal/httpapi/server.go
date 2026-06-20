@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/NUS-MTech-Capstone/incident-agent/api"
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/service"
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/store"
 )
@@ -37,6 +38,7 @@ func New(svc *service.Service) *Server {
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	s.mux.HandleFunc("GET /openapi.yaml", serveYAML(api.OpenAPI))
 	s.mux.Handle("GET /incidents", cognito(http.HandlerFunc(s.list)))
 	s.mux.Handle("GET /incidents/", cognito(http.HandlerFunc(s.detail)))
 	s.mux.Handle("POST /incidents/", cognito(http.HandlerFunc(s.action)))
@@ -180,6 +182,14 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func serveYAML(contents []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(contents)
+	}
 }
 
 const pageTemplates = `
