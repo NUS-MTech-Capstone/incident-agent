@@ -141,7 +141,7 @@ func (s *Service) Approve(ctx context.Context, id, planHash, subject string) err
 	if err := s.store.Approve(ctx, id, planHash, subject); err != nil {
 		return err
 	}
-	go s.execute(context.Background(), id)
+	go s.execute(context.WithoutCancel(ctx), id)
 	return nil
 }
 

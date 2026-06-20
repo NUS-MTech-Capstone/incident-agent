@@ -109,11 +109,11 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("incident decision failed incidentId=%s action=%s error=%v", id, action, err)
+		log.Printf("incident decision failed incidentId=%q action=%q error=%q", id, action, err.Error()) // #nosec G706 -- id/action are constrained and %q escapes control characters.
 		http.Error(w, "unable to record decision", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/incidents/"+id, http.StatusSeeOther)
+	http.Redirect(w, r, "/incidents/"+url.PathEscape(id), http.StatusSeeOther)
 }
 
 func sameOrigin(r *http.Request) bool {
@@ -172,10 +172,26 @@ func parseIncidentPath(path string) (string, string) {
 	if len(parts) < 2 || parts[0] != "incidents" {
 		return "", ""
 	}
+	if !validPathID(parts[1]) {
+		return "", ""
+	}
 	if len(parts) == 2 {
 		return parts[1], ""
 	}
 	return parts[1], parts[2]
+}
+
+func validPathID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

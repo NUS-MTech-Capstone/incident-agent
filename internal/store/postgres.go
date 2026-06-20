@@ -27,12 +27,12 @@ func NewPostgres(ctx context.Context, databaseURL string) (*Postgres, error) {
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 	store := &Postgres{db: db, now: time.Now}
 	if err := store.migrate(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return store, nil

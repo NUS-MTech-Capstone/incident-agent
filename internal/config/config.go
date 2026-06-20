@@ -37,8 +37,8 @@ func Load() Config {
 		HTTPTimeout:          durationEnv("HTTP_TIMEOUT", 10*time.Second),
 		OperationTimeout:     durationEnv("OPERATION_TIMEOUT", 45*time.Second),
 		MaxOperationOutput:   intEnv("MAX_OPERATION_OUTPUT_BYTES", 256*1024),
-		SQSPollWait:          int32(intEnv("SQS_POLL_WAIT_SECONDS", 20)),
-		SQSVisibilityTimeout: int32(intEnv("SQS_VISIBILITY_TIMEOUT_SECONDS", 600)),
+		SQSPollWait:          int32Env("SQS_POLL_WAIT_SECONDS", 20),
+		SQSVisibilityTimeout: int32Env("SQS_VISIBILITY_TIMEOUT_SECONDS", 600),
 	}
 }
 
@@ -55,6 +55,14 @@ func intEnv(key string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func int32Env(key string, fallback int32) int32 {
+	value, err := strconv.ParseInt(env(key, strconv.FormatInt(int64(fallback), 10)), 10, 32)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return int32(value)
 }
 
 func durationEnv(key string, fallback time.Duration) time.Duration {
