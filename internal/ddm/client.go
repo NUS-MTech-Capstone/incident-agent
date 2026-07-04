@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/model"
+	"github.com/NUS-MTech-Capstone/incident-agent/internal/observability"
 )
 
 type Client struct {
@@ -56,6 +57,7 @@ func (c *Client) CloseRun(ctx context.Context, runID, capabilityToken string) er
 	}
 	req.Header.Set("Authorization", "Bearer "+capabilityToken)
 	req.Header.Set("Content-Type", "application/json")
+	observability.SetRequestHeaders(ctx, req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return err
@@ -79,6 +81,7 @@ func (c *Client) Execute(ctx context.Context, operationsURL, runID, capabilityTo
 	}
 	req.Header.Set("Authorization", "Bearer "+capabilityToken)
 	req.Header.Set("Content-Type", "application/json")
+	observability.SetRequestHeaders(ctx, req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return model.OperationResult{}, err
@@ -109,6 +112,7 @@ func (c *Client) controlRequest(ctx context.Context, path string, payload any) (
 	}
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
 	req.Header.Set("Content-Type", "application/json")
+	observability.SetRequestHeaders(ctx, req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return Run{}, err

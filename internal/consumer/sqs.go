@@ -2,11 +2,12 @@ package consumer
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/alerts"
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/model"
+	"github.com/NUS-MTech-Capstone/incident-agent/internal/observability"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 )
@@ -32,7 +33,7 @@ func NewSQS(client *sqs.Client, queueURL string, handler Handler, waitSeconds, v
 
 func (c *SQS) Run(ctx context.Context) {
 	if c.queueURL == "" {
-		log.Printf("incident SQS consumer disabled: INCIDENT_QUEUE_URL is empty")
+		slog.Info("IncidentSQSConsumerDisabled")
 		return
 	}
 	for ctx.Err() == nil {
@@ -42,7 +43,10 @@ func (c *SQS) Run(ctx context.Context) {
 		})
 		if err != nil {
 			if ctx.Err() == nil {
-				log.Printf("receive incident alerts failed: %v", err)
+				slog.WarnContext(ctx, "IncidentAlertReceiveFailed",
+					"errorKind", observability.ErrorKind(err),
+					"error", err,
+				)
 				select {
 				case <-ctx.Done():
 				case <-time.After(2 * time.Second):
@@ -54,18 +58,32 @@ func (c *SQS) Run(ctx context.Context) {
 			if message.Body == nil || message.ReceiptHandle == nil {
 				continue
 			}
+			messageCtx := ctx
+			if message.MessageId != nil {
+				messageCtx = observability.ContextWithRequestID(ctx, *message.MessageId)
+			}
 			alert, err := alerts.ParseSQSBody(*message.Body)
 			if err == nil {
-				err = c.handler.HandleAlert(ctx, alert)
+				err = c.handler.HandleAlert(messageCtx, alert)
 			}
 			if err != nil {
-				log.Printf("incident alert handling failed: %v", err)
+				slog.WarnContext(messageCtx, "IncidentAlertHandlingFailed",
+					"requestId", observability.RequestID(messageCtx),
+					"alarmName", alert.AlarmName,
+					"hostId", alert.HostID,
+					"errorKind", observability.ErrorKind(err),
+					"error", err,
+				)
 				continue
 			}
 			if _, err := c.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 				QueueUrl: aws.String(c.queueURL), ReceiptHandle: message.ReceiptHandle,
 			}); err != nil {
-				log.Printf("delete incident alert failed: %v", err)
+				slog.WarnContext(messageCtx, "IncidentAlertDeleteFailed",
+					"requestId", observability.RequestID(messageCtx),
+					"errorKind", observability.ErrorKind(err),
+					"error", err,
+				)
 			}
 		}
 	}

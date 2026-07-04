@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os/signal"
 	"strings"
@@ -14,6 +14,7 @@ import (
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/consumer"
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/ddm"
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/httpapi"
+	"github.com/NUS-MTech-Capstone/incident-agent/internal/observability"
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/planner"
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/service"
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/store"
@@ -24,30 +25,35 @@ import (
 )
 
 func main() {
+	observability.ConfigureLogger("incident-agent")
 	cfg := config.Load()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(cfg.AWSRegion))
 	if err != nil {
-		log.Fatalf("load AWS configuration: %v", err)
+		slog.Error("load AWS configuration failed", "error", err)
+		return
 	}
 	databaseURL := cfg.DatabaseURL
 	if databaseURL == "" && cfg.DatabaseSecretID != "" {
 		output, err := secretsmanager.NewFromConfig(awsCfg).GetSecretValue(ctx,
 			&secretsmanager.GetSecretValueInput{SecretId: &cfg.DatabaseSecretID})
 		if err != nil {
-			log.Fatalf("read database secret: %v", err)
+			slog.Error("read database secret failed", "error", err)
+			return
 		}
 		if output.SecretString != nil {
 			databaseURL = strings.TrimSpace(*output.SecretString)
 		}
 	}
 	if databaseURL == "" {
-		log.Fatal("DATABASE_URL or DATABASE_SECRET_ID is required")
+		slog.Error("DATABASE_URL or DATABASE_SECRET_ID is required")
+		return
 	}
 	incidentStore, err := store.NewPostgres(ctx, databaseURL)
 	if err != nil {
-		log.Fatalf("initialize incident store: %v", err)
+		slog.Error("initialize incident store failed", "error", err)
+		return
 	}
 	defer incidentStore.Close()
 	ddmClient := ddm.New(cfg.ControlPlaneURL, cfg.WorkloadTokenFile, cfg.HTTPTimeout)
@@ -71,8 +77,8 @@ func main() {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	log.Printf("incident-agent listening on :%s model=%s", cfg.Port, cfg.BedrockModelID)
+	slog.Info("server_listening", "addr", ":"+cfg.Port, "model", cfg.BedrockModelID)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+		slog.Error("server failed", "error", err)
 	}
 }

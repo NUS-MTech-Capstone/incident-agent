@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/NUS-MTech-Capstone/incident-agent/api"
+	"github.com/NUS-MTech-Capstone/incident-agent/internal/observability"
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/service"
 	"github.com/NUS-MTech-Capstone/incident-agent/internal/store"
 )
@@ -46,7 +47,7 @@ func New(svc *service.Service) *Server {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	observability.RequestIDMiddleware(observability.LogRequests(s.mux)).ServeHTTP(w, r)
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +110,13 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("incident decision failed incidentId=%q action=%q error=%q", id, action, err.Error()) // #nosec G706 -- id/action are constrained and %q escapes control characters.
+		slog.WarnContext(r.Context(), "IncidentDecisionFailed",
+			"requestId", observability.RequestID(r.Context()),
+			"incidentId", id,
+			"action", action,
+			"errorKind", observability.ErrorKind(err),
+			"error", err,
+		)
 		http.Error(w, "unable to record decision", http.StatusInternalServerError)
 		return
 	}
@@ -131,7 +138,7 @@ func sameOrigin(r *http.Request) bool {
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.pages.ExecuteTemplate(w, name, data); err != nil {
-		log.Printf("render incident page failed: %v", err)
+		slog.Warn("IncidentPageRenderFailed", "error", err)
 	}
 }
 
