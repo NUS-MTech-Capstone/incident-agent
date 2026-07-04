@@ -4,7 +4,7 @@ info:
   version: 0.1.0
   description: Incident review web endpoints. Responses are HTML except for health and this spec.
 servers:
-  - url: http://localhost:8085
+  - url: http://localhost:8091
 paths:
   /healthz:
     get:

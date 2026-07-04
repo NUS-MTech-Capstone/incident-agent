@@ -1,10 +1,30 @@
-.PHONY: test build run
+.PHONY: sync lint format-check typecheck test coverage build security audit ci
+
+sync:
+	uv sync --frozen
+
+lint:
+	uv run ruff check .
+
+format-check:
+	uv run ruff format --check .
+
+typecheck:
+	uv run mypy
 
 test:
-	go test ./...
+	uv run pytest
+
+coverage:
+	uv run pytest --cov=incident_agent --cov-report=term-missing --cov-report=xml --cov-report=html
 
 build:
-	go build ./cmd/server
+	uv build --no-build-isolation
 
-run:
-	go run ./cmd/server
+security:
+	uv run bandit -r src -q
+
+audit:
+	uv run pip-audit
+
+ci: sync lint format-check typecheck test security audit

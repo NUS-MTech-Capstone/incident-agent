@@ -1,0 +1,77 @@
+[project]
+name = "incident-agent"
+version = "0.1.0"
+description = "Python LangGraph baseline for DenDenMushi incident triage and approval-gated remediation."
+requires-python = ">=3.11"
+dependencies = [
+  "alembic>=1.16.0",
+  "boto3>=1.39.0",
+  "fastapi>=0.116.0",
+  "httpx>=0.28.0",
+  "jinja2>=3.1.0",
+  "langchain-aws>=0.2.0",
+  "langchain-core>=0.3.0",
+  "langgraph>=0.5.0",
+  "psycopg[binary]>=3.2.0",
+  "pydantic>=2.11.0",
+  "pydantic-settings>=2.10.0",
+  "python-multipart>=0.0.20",
+  "sqlalchemy>=2.0.0",
+  "uvicorn[standard]>=0.35.0",
+]
+
+[dependency-groups]
+dev = [
+  "bandit>=1.8.0",
+  "hatchling>=1.28.0",
+  "mypy>=1.16.0",
+  "pip-audit>=2.9.0",
+  "pytest>=8.4.0",
+  "pytest-asyncio>=1.0.0",
+  "pytest-cov>=6.2.0",
+  "ruff>=0.12.0",
+]
+
+[project.scripts]
+incident-agent = "incident_agent.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/incident_agent"]
+artifacts = ["src/incident_agent/py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests", "evals"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "BLE", "UP", "S"]
+ignore = [
+  "S101",
+  "S608",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+packages = ["incident_agent"]
+
+[[tool.mypy.overrides]]
+module = ["boto3", "langchain_aws"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["incident_agent"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

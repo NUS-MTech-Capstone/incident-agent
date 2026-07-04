@@ -1,2 +1,13 @@
 /coverage.out
 /incident-agent
+/.venv
+/.coverage
+/coverage.xml
+/htmlcov
+/dist
+/*.egg-info
+/.mypy_cache
+/.pytest_cache
+/.ruff_cache
+__pycache__/
+*.py[cod]
