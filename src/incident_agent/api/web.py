@@ -4,15 +4,25 @@ import base64
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any, TypedDict
 from urllib.parse import quote
 
-from fastapi import FastAPI, Form, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from incident_agent.models import IncidentState
+from incident_agent.models import Incident, IncidentState
 from incident_agent.observability import REQUEST_ID_HEADER, new_request_id, use_request_id
 from incident_agent.persistence.store import Conflict, NotFound
 from incident_agent.service import IncidentService
+
+APPROVER_GROUPS = {"Manager", "Admin"}
+
+
+class UserClaims(TypedDict):
+    sub: str
+    email: str
+    groups: list[str]
 
 
 def create_app(service: IncidentService) -> FastAPI:
@@ -43,10 +53,15 @@ def create_app(service: IncidentService) -> FastAPI:
         path = Path(__file__).resolve().parents[3] / "api" / "openapi.yaml"
         return Response(path.read_text(encoding="utf-8"), media_type="application/yaml; charset=utf-8")
 
-    @app.get("/incidents", response_class=HTMLResponse)
-    async def list_incidents(x_amzn_oidc_data: str | None = Header(default=None)) -> HTMLResponse:
+    @app.get("/incidents")
+    async def list_incidents(
+        request: Request,
+        x_amzn_oidc_data: str | None = Header(default=None),
+    ) -> Response:
         user = _user_from_header(x_amzn_oidc_data)
         incidents = service.list()
+        if _wants_json(request):
+            return _json({"incidents": [_incident_summary(incident) for incident in incidents]})
         rows = (
             "".join(
                 f"<tr><td>{incident.created_at}</td><td><a href='/incidents/{quote(incident.id)}'>"
@@ -65,13 +80,19 @@ def create_app(service: IncidentService) -> FastAPI:
             )
         )
 
-    @app.get("/incidents/{incident_id}", response_class=HTMLResponse)
-    async def detail(incident_id: str, x_amzn_oidc_data: str | None = Header(default=None)) -> HTMLResponse:
-        _user_from_header(x_amzn_oidc_data)
+    @app.get("/incidents/{incident_id}")
+    async def detail(
+        request: Request,
+        incident_id: str,
+        x_amzn_oidc_data: str | None = Header(default=None),
+    ) -> Response:
+        user = _user_from_header(x_amzn_oidc_data)
         try:
             incident = service.get(incident_id)
         except NotFound as exc:
             raise HTTPException(status_code=404, detail="incident not found") from exc
+        if _wants_json(request):
+            return _json(_incident_detail(incident))
         actions = "".join(
             f"<p><code>{_h(action.operation_id)}</code>: {_h(action.reason)}</p>" for action in incident.plan.actions
         )
@@ -82,7 +103,7 @@ def create_app(service: IncidentService) -> FastAPI:
                 f"<p><b>{_h(incident.plan.summary)}</b></p><p>{_h(incident.plan.rationale)}</p>{actions}</div>"
             )
         decision = ""
-        if incident.state == IncidentState.AWAITING_APPROVAL:
+        if incident.state == IncidentState.AWAITING_APPROVAL and _can_decide(user):
             decision = (
                 f"<form method='post' action='/incidents/{quote(incident.id)}/approve'>"
                 f"<input type='hidden' name='planHash' value='{_h(incident.plan_hash)}'>"
@@ -112,36 +133,42 @@ def create_app(service: IncidentService) -> FastAPI:
     async def approve(
         request: Request,
         incident_id: str,
-        plan_hash: str = Form(alias="planHash"),
         x_amzn_oidc_data: str | None = Header(default=None),
-    ) -> RedirectResponse:
+    ) -> Response:
         user = _user_from_header(x_amzn_oidc_data)
+        _require_decision_authority(user)
         _same_origin(request)
+        plan_hash = await _plan_hash_from_request(request)
         try:
             service.approve(incident_id, plan_hash, user["sub"])
         except Conflict as exc:
             raise HTTPException(status_code=409, detail="incident changed; reload before deciding") from exc
+        if _wants_json(request):
+            return _json(_incident_detail(service.get(incident_id)))
         return RedirectResponse(f"/incidents/{quote(incident_id)}", status_code=303)
 
     @app.post("/incidents/{incident_id}/reject")
     async def reject(
         request: Request,
         incident_id: str,
-        plan_hash: str = Form(alias="planHash"),
         x_amzn_oidc_data: str | None = Header(default=None),
-    ) -> RedirectResponse:
+    ) -> Response:
         user = _user_from_header(x_amzn_oidc_data)
+        _require_decision_authority(user)
         _same_origin(request)
+        plan_hash = await _plan_hash_from_request(request)
         try:
             service.reject(incident_id, plan_hash, user["sub"])
         except Conflict as exc:
             raise HTTPException(status_code=409, detail="incident changed; reload before deciding") from exc
+        if _wants_json(request):
+            return _json(_incident_detail(service.get(incident_id)))
         return RedirectResponse(f"/incidents/{quote(incident_id)}", status_code=303)
 
     return app
 
 
-def _user_from_header(token: str | None) -> dict[str, str]:
+def _user_from_header(token: str | None) -> UserClaims:
     if not token:
         raise HTTPException(status_code=401, detail="missing or invalid Cognito identity")
     parts = token.split(".")
@@ -154,7 +181,89 @@ def _user_from_header(token: str | None) -> dict[str, str]:
         raise HTTPException(status_code=401, detail="missing or invalid Cognito identity") from exc
     if not claims.get("sub"):
         raise HTTPException(status_code=401, detail="missing or invalid Cognito identity")
-    return {"sub": str(claims["sub"]), "email": str(claims.get("email", ""))}
+    return {
+        "sub": str(claims["sub"]),
+        "email": str(claims.get("email", "")),
+        "groups": _groups_from_claims(claims),
+    }
+
+
+def _groups_from_claims(claims: dict[str, Any]) -> list[str]:
+    raw = claims.get("cognito:groups") or claims.get("groups") or []
+    if isinstance(raw, list):
+        return [str(item) for item in raw]
+    if isinstance(raw, str):
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    return []
+
+
+def _can_decide(user: UserClaims) -> bool:
+    return bool(APPROVER_GROUPS.intersection(user["groups"]))
+
+
+def _require_decision_authority(user: UserClaims) -> None:
+    if not _can_decide(user):
+        raise HTTPException(status_code=403, detail="manager approval is required")
+
+
+async def _plan_hash_from_request(request: Request) -> str:
+    content_type = request.headers.get("content-type", "").lower()
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="planHash is required") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="planHash is required")
+        value = body.get("planHash")
+    else:
+        form = await request.form()
+        value = form.get("planHash")
+    if not isinstance(value, str) or not value:
+        raise HTTPException(status_code=400, detail="planHash is required")
+    return value
+
+
+def _wants_json(request: Request) -> bool:
+    accept = request.headers.get("accept", "")
+    content_type = request.headers.get("content-type", "")
+    return "application/json" in accept.lower() or "application/json" in content_type.lower()
+
+
+def _json(payload: dict[str, Any]) -> JSONResponse:
+    return JSONResponse(content=jsonable_encoder(payload))
+
+
+def _incident_summary(incident: Incident) -> dict[str, Any]:
+    return {
+        "id": incident.id,
+        "alarmName": incident.alarm_name,
+        "hostId": incident.host_id,
+        "state": incident.state.value,
+        "reason": incident.reason,
+        "runbookVersion": incident.runbook_version,
+        "planHash": incident.plan_hash,
+        "approvalDecision": incident.approval_decision,
+        "approvalAt": incident.approval_at,
+        "createdAt": incident.created_at,
+        "updatedAt": incident.updated_at,
+    }
+
+
+def _incident_detail(incident: Incident) -> dict[str, Any]:
+    detail = _incident_summary(incident)
+    detail.update(
+        {
+            "sourceId": incident.source_id,
+            "alarmArn": incident.alarm_arn,
+            "evidence": [item.model_dump(by_alias=True) for item in incident.evidence],
+            "plan": incident.plan.model_dump(by_alias=True),
+            "approverSubject": incident.approver_subject,
+            "report": incident.report,
+            "errorMessage": incident.error_message,
+        }
+    )
+    return detail
 
 
 def _same_origin(request: Request) -> None:

@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: DenDenMushi Incident Agent API
   version: 0.1.0
-  description: Incident review web endpoints. Responses are HTML except for health and this spec.
+  description: Incident review endpoints. Incident pages are available as HTML, and the same routes return JSON for the Angular Agentic AI UI when requested with Accept application/json.
 servers:
   - url: http://localhost:8091
 paths:
@@ -30,16 +30,25 @@ paths:
           description: Service dependency check failed.
   /incidents:
     get:
-      summary: List incident review pages
+      summary: List incidents
       security:
         - albCognito: []
       responses:
         "200":
-          description: HTML incident list.
+          description: HTML incident list or JSON incident summaries.
           content:
             text/html:
               schema:
                 type: string
+            application/json:
+              schema:
+                type: object
+                required: [incidents]
+                properties:
+                  incidents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/IncidentSummary"
         "401":
           description: Missing or invalid Cognito identity.
           content:
@@ -48,18 +57,21 @@ paths:
                 type: string
   /incidents/{incidentId}:
     get:
-      summary: Show incident detail and approval form
+      summary: Show incident detail
       security:
         - albCognito: []
       parameters:
         - $ref: "#/components/parameters/IncidentId"
       responses:
         "200":
-          description: HTML incident detail.
+          description: HTML incident detail or JSON incident detail.
           content:
             text/html:
               schema:
                 type: string
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentDetail"
         "401":
           description: Missing or invalid Cognito identity.
           content:
@@ -85,13 +97,22 @@ paths:
           application/x-www-form-urlencoded:
             schema:
               $ref: "#/components/schemas/DecisionForm"
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DecisionForm"
       responses:
+        "200":
+          description: JSON updated incident detail when requested by the Angular UI.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentDetail"
         "303":
-          description: Redirects to the incident detail page.
+          description: HTML form submissions redirect to the incident detail page.
         "400":
           description: Identity or plan hash missing.
         "403":
-          description: Cross-site decision rejected.
+          description: Cross-site decision rejected or user is not in Manager/Admin.
         "409":
           description: Incident changed; reload before deciding.
   /incidents/{incidentId}/reject:
@@ -107,13 +128,22 @@ paths:
           application/x-www-form-urlencoded:
             schema:
               $ref: "#/components/schemas/DecisionForm"
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DecisionForm"
       responses:
+        "200":
+          description: JSON updated incident detail when requested by the Angular UI.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentDetail"
         "303":
-          description: Redirects to the incident detail page.
+          description: HTML form submissions redirect to the incident detail page.
         "400":
           description: Identity or plan hash missing.
         "403":
-          description: Cross-site decision rejected.
+          description: Cross-site decision rejected or user is not in Manager/Admin.
         "409":
           description: Incident changed; reload before deciding.
 components:
@@ -150,3 +180,88 @@ components:
       properties:
         planHash:
           type: string
+    IncidentSummary:
+      type: object
+      required: [id, alarmName, hostId, state, reason, runbookVersion, planHash, approvalDecision, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        alarmName:
+          type: string
+        hostId:
+          type: string
+        state:
+          type: string
+          enum: [DIAGNOSING, AWAITING_APPROVAL, EXECUTING, COMPLETED, REJECTED, RECOVERED, FAILED]
+        reason:
+          type: string
+        runbookVersion:
+          type: string
+        planHash:
+          type: string
+        approvalDecision:
+          type: string
+        approvalAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    IncidentDetail:
+      allOf:
+        - $ref: "#/components/schemas/IncidentSummary"
+        - type: object
+          required: [sourceId, alarmArn, evidence, plan, approverSubject, report, errorMessage]
+          properties:
+            sourceId:
+              type: string
+            alarmArn:
+              type: string
+            evidence:
+              type: array
+              items:
+                $ref: "#/components/schemas/OperationResult"
+            plan:
+              $ref: "#/components/schemas/Plan"
+            approverSubject:
+              type: string
+            report:
+              type: string
+            errorMessage:
+              type: string
+    Plan:
+      type: object
+      required: [summary, rationale, actions]
+      properties:
+        summary:
+          type: string
+        rationale:
+          type: string
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlanAction"
+    PlanAction:
+      type: object
+      required: [operationId, reason]
+      properties:
+        operationId:
+          type: string
+        reason:
+          type: string
+    OperationResult:
+      type: object
+      required: [operationId, stdout, stderr, exitCode]
+      properties:
+        operationId:
+          type: string
+        stdout:
+          type: string
+        stderr:
+          type: string
+        exitCode:
+          type: integer

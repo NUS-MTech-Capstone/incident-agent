@@ -11,7 +11,8 @@ the model and behind explicit validation plus human approval.
 The service consumes CloudWatch alarm notifications from SQS, gathers bounded
 diagnostics through the existing DenDenMushi automation path, asks Bedrock
 through LangChain for structured triage and plan output, stores the incident in
-Postgres, and exposes Cognito-protected approval pages.
+Postgres, and exposes Cognito-protected approval pages plus JSON endpoints for
+the Angular Agentic AI UI.
 
 The model never receives authority to execute free-form shell commands. The
 only mutating v1 operation is `restart_service`, and it runs only after a human
@@ -134,8 +135,23 @@ POST /incidents/{incidentId}/approve
 POST /incidents/{incidentId}/reject
 ```
 
+The incident list and detail routes preserve their HTML responses for direct
+browser review. When called with `Accept: application/json`, they return safe
+incident summaries/details for the Angular Agentic AI tab. Approval routes
+accept either HTML form data or JSON:
+
+```json
+{"planHash":"<exact stored plan hash>"}
+```
+
+JSON approval and rejection responses return the updated incident detail. The
+JSON surface intentionally omits automation operation URLs, capability tokens,
+secrets, prompts, and terminal streams.
+
 The incident routes trust Cognito identity headers supplied by the authenticated
-ALB boundary and must not be exposed through an unauthenticated ingress.
+ALB boundary and must not be exposed through an unauthenticated ingress. Any
+authenticated operator may view incidents, but approval and rejection require
+the Cognito user to be in the `Manager` or `Admin` group.
 
 ## Development
 
