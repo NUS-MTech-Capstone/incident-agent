@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import quote
 
@@ -9,20 +10,37 @@ from fastapi import FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from incident_agent.models import IncidentState
+from incident_agent.observability import REQUEST_ID_HEADER, new_request_id, use_request_id
+from incident_agent.persistence.store import Conflict, NotFound
 from incident_agent.service import IncidentService
-from incident_agent.store import Conflict, NotFound
 
 
 def create_app(service: IncidentService) -> FastAPI:
     app = FastAPI(title="DenDenMushi Incident Agent API", version="0.1.0")
 
+    @app.middleware("http")
+    async def request_id_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+        request_id = request.headers.get(REQUEST_ID_HEADER) or new_request_id()
+        with use_request_id(request_id):
+            response = await call_next(request)
+            response.headers[REQUEST_ID_HEADER] = request_id
+            return response
+
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/readyz")
+    async def readyz() -> dict[str, str]:
+        try:
+            service.ready()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="service is not ready") from exc
+        return {"status": "ready"}
+
     @app.get("/openapi.yaml")
     async def openapi_yaml() -> Response:
-        path = Path(__file__).resolve().parents[2] / "api" / "openapi.yaml"
+        path = Path(__file__).resolve().parents[3] / "api" / "openapi.yaml"
         return Response(path.read_text(encoding="utf-8"), media_type="application/yaml; charset=utf-8")
 
     @app.get("/incidents", response_class=HTMLResponse)

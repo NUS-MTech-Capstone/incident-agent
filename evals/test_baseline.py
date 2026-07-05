@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 
 from incident_agent.models import IncidentState, OperationResult, Plan
-from incident_agent.planner import RuleBasedPlanner
-from incident_agent.store import IncidentStore
-from incident_agent.supervisor import validate_plan
+from incident_agent.persistence.store import IncidentStore
+from incident_agent.planning.planner import RuleBasedPlanner
+from incident_agent.planning.supervisor import validate_plan
 from tests.conftest import alert
 
 

@@ -43,6 +43,12 @@ build-backend = "hatchling.build"
 packages = ["src/incident_agent"]
 artifacts = ["src/incident_agent/py.typed"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"prompts" = "prompts"
+
+[tool.hatch.build.targets.sdist.force-include]
+"prompts" = "prompts"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests", "evals"]

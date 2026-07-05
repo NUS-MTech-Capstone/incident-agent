@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from incident_agent.alerts import parse_sqs_body
+from incident_agent.ingest.alerts import parse_sqs_body
 
 
 def test_parse_sqs_body() -> None:

@@ -6,12 +6,12 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
-from incident_agent.ddm import DDMClient
+from incident_agent.automation.ddm import DDMClient
 from incident_agent.models import Alert, Incident, OperationResult, Plan, Priority, Run, TriageResult
-from incident_agent.planner import RuleBasedPlanner
+from incident_agent.persistence.store import IncidentStore
+from incident_agent.planning.planner import RuleBasedPlanner
+from incident_agent.planning.workflow import IncidentWorkflow
 from incident_agent.service import IncidentService
-from incident_agent.store import IncidentStore
-from incident_agent.workflow import IncidentWorkflow
 
 
 class FakeDDM(DDMClient):
@@ -86,7 +86,7 @@ def store() -> IncidentStore:
 
 def make_service(store: IncidentStore, ddm: FakeDDM, planner: RuleBasedPlanner) -> IncidentService:
     workflow = IncidentWorkflow(planner, ddm, 1, 4096)
-    return IncidentService(store, workflow, ddm, 1, 4096, task_runner=lambda coro: None)
+    return IncidentService(store, workflow, ddm, 1, 4096, task_runner=lambda coro: coro.close())
 
 
 def alert(source_id: str = "source-1", state: str = "ALARM") -> Alert:

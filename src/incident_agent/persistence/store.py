@@ -74,6 +74,10 @@ class IncidentStore:
     def close(self) -> None:
         self.engine.dispose()
 
+    def ping(self) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(select(1))
+
     def create(self, alert: Alert) -> Incident:
         now = _utcnow()
         incident_id = "inc-" + secrets.token_hex(16)

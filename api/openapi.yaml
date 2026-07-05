@@ -16,6 +16,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+  /readyz:
+    get:
+      summary: Readiness probe
+      responses:
+        "200":
+          description: Service dependencies are ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+        "503":
+          description: Service dependency check failed.
   /incidents:
     get:
       summary: List incident review pages
@@ -125,6 +137,13 @@ components:
         status:
           type: string
           example: ok
+    ReadyResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ready
     DecisionForm:
       type: object
       required: [planHash]

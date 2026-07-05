@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from incident_agent.ddm import DDMClient
+from incident_agent.automation.ddm import DDMClient
 
 
 @pytest.mark.asyncio

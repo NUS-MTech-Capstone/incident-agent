@@ -1,22 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 
 import boto3
 import uvicorn
 from fastapi import FastAPI
 
+from incident_agent.api.web import create_app
+from incident_agent.automation.ddm import DDMClient
 from incident_agent.config import load_settings
-from incident_agent.consumer import SQSConsumer
-from incident_agent.ddm import DDMClient
-from incident_agent.planner import BedrockPlanner
+from incident_agent.ingest.sqs import SQSConsumer
+from incident_agent.observability import configure_logging
+from incident_agent.persistence.store import IncidentStore
+from incident_agent.planning.planner import BedrockPlanner
+from incident_agent.planning.workflow import IncidentWorkflow
 from incident_agent.service import IncidentService
-from incident_agent.store import IncidentStore
-from incident_agent.web import create_app
-from incident_agent.workflow import IncidentWorkflow
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 
 def build_service() -> IncidentService:
@@ -28,8 +26,19 @@ def build_service() -> IncidentService:
     if not database_url:
         raise RuntimeError("DATABASE_URL or DATABASE_SECRET_ID is required")
     store = IncidentStore(database_url)
-    ddm = DDMClient(settings.proxy_controlplane_url, settings.workload_token_file, settings.http_timeout_seconds)
-    planner = BedrockPlanner(settings.bedrock_model_id, settings.bedrock_max_prompt_bytes, settings.aws_region)
+    ddm = DDMClient(
+        settings.proxy_controlplane_url,
+        settings.workload_token_file,
+        settings.http_timeout_seconds,
+        settings.transient_retry_attempts,
+    )
+    planner = BedrockPlanner(
+        settings.bedrock_model_id,
+        settings.bedrock_max_prompt_bytes,
+        settings.aws_region,
+        settings.incident_agent_prompts_dir,
+        settings.transient_retry_attempts,
+    )
     workflow = IncidentWorkflow(planner, ddm, settings.operation_timeout_seconds, settings.max_operation_output_bytes)
     return IncidentService(
         store,
@@ -42,6 +51,7 @@ def build_service() -> IncidentService:
 
 def create_runtime_app() -> FastAPI:
     settings = load_settings()
+    configure_logging(settings.log_format)
     service = build_service()
     app = create_app(service)
     if settings.enable_sqs_consumer:
@@ -60,6 +70,7 @@ def create_runtime_app() -> FastAPI:
         @app.on_event("shutdown")
         async def stop_consumer() -> None:
             consumer.stop()
+            await consumer.wait_stopped()
             service.store.close()
 
     return app

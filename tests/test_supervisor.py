@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 
 from incident_agent.models import IncidentState, OperationResult, Plan
-from incident_agent.store import IncidentStore
-from incident_agent.supervisor import plan_hash, validate_execution, validate_plan
+from incident_agent.persistence.store import IncidentStore
+from incident_agent.planning.supervisor import plan_hash, validate_execution, validate_plan
 from tests.conftest import alert
 
 

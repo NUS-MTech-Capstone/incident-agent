@@ -9,6 +9,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
 COPY api ./api
+COPY prompts ./prompts
 
 FROM python:3.12-slim-bookworm
 

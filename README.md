@@ -23,7 +23,10 @@ proxies interactive terminal streams.
 
 ```text
 PORT=8091
+LOG_FORMAT=json
 AWS_REGION=ap-southeast-1
+ENVIRONMENT=dev
+CLOUDWATCH_NAMESPACE=DenDenMushi
 INCIDENT_QUEUE_URL=
 DATABASE_URL=
 DATABASE_SECRET_ID=
@@ -31,7 +34,9 @@ PROXY_CONTROLPLANE_URL=http://proxy-controlplane:8080
 WORKLOAD_TOKEN_FILE=/var/run/secrets/tokens/incident-agent-token
 BEDROCK_MODEL_ID=global.amazon.nova-2-lite-v1:0
 BEDROCK_MAX_PROMPT_BYTES=131072
+INCIDENT_AGENT_PROMPTS_DIR=
 HTTP_TIMEOUT_SECONDS=10
+TRANSIENT_RETRY_ATTEMPTS=2
 OPERATION_TIMEOUT_SECONDS=45
 MAX_OPERATION_OUTPUT_BYTES=262144
 SQS_POLL_WAIT_SECONDS=20
@@ -42,6 +47,11 @@ LANGSMITH_TRACING=false
 
 `DATABASE_SECRET_ID` must contain the raw Postgres connection URL. Prefer it to
 `DATABASE_URL` in EKS.
+
+Bedrock prompt templates live under the repository root `prompts/` directory.
+`INCIDENT_AGENT_PROMPTS_DIR` may point at another template directory for local
+experiments or environment-specific packaging; if unset, the service resolves
+the root `prompts/` directory and the Docker image copies it to `/app/prompts`.
 
 CloudWatch alarm descriptions must be JSON:
 
@@ -89,10 +99,34 @@ The deterministic supervisor rejects unknown tools, command-like plan content,
 plan hash drift, missing approval, and execution outside the approved operation
 order.
 
+## Observability
+
+Production observability is AWS-native by default. The service emits JSON logs
+when `LOG_FORMAT=json`, propagates `X-Request-ID` on HTTP requests, creates a
+correlation ID for each SQS message, and writes CloudWatch EMF metrics to
+stdout in `CLOUDWATCH_NAMESPACE`.
+
+Metrics use low-cardinality dimensions only (`Service=incident-agent` and
+`Environment`). Log fields are metadata such as `requestId`, `incidentId`,
+`runId`, `hostId`, `operation`, `planHash`, `state`, `durationMs`, and
+`errorKind`; prompts, model responses, tokens, command bodies, diagnostic
+stdout/stderr, and terminal streams must not be logged.
+
+LangSmith can be enabled for local or staging prompt debugging with
+`LANGSMITH_TRACING=true`, but production keeps it disabled. Bedrock invocation
+logging and OpenTelemetry/X-Ray tracing should also remain disabled by default
+because they can retain sensitive prompt or evidence data; enable them only for
+short, explicit debug windows.
+
+SQS failures are left for normal queue redelivery and DLQ handling. Inspect the
+Terraform-created DLQ when `SQSMessageFailures` alarms, fix the parser or
+upstream alarm description, then replay messages by redriving them from the DLQ.
+
 ## Routes
 
 ```http
 GET  /healthz
+GET  /readyz
 GET  /openapi.yaml
 GET  /incidents
 GET  /incidents/{incidentId}
@@ -104,6 +138,17 @@ The incident routes trust Cognito identity headers supplied by the authenticated
 ALB boundary and must not be exposed through an unauthenticated ingress.
 
 ## Development
+
+The Python import namespace remains `incident_agent`, with implementation
+grouped into domain subpackages:
+
+```text
+incident_agent.api          HTTP routes and approval pages
+incident_agent.automation   DenDenMushi automation client
+incident_agent.ingest       CloudWatch/SQS alert ingestion
+incident_agent.persistence  incident storage
+incident_agent.planning     prompts, Bedrock planning, LangGraph workflow, guardrails
+```
 
 ```bash
 uv sync
