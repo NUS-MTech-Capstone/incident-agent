@@ -11,7 +11,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from incident_agent.models import Incident, IncidentState
+from incident_agent.models import Incident, IncidentState, ManagedAlert
 from incident_agent.observability import REQUEST_ID_HEADER, new_request_id, use_request_id
 from incident_agent.persistence.store import Conflict, NotFound
 from incident_agent.service import IncidentService
@@ -52,6 +52,26 @@ def create_app(service: IncidentService) -> FastAPI:
     async def openapi_yaml() -> Response:
         path = Path(__file__).resolve().parents[3] / "api" / "openapi.yaml"
         return Response(path.read_text(encoding="utf-8"), media_type="application/yaml; charset=utf-8")
+
+    @app.get("/alerts")
+    async def list_alerts(x_amzn_oidc_data: str | None = Header(default=None)) -> JSONResponse:
+        _user_from_header(x_amzn_oidc_data)
+        return _json({"alerts": [_alert_summary(alert) for alert in service.list_alerts()]})
+
+    @app.get("/alerts/{alert_id}")
+    async def alert_detail(alert_id: str, x_amzn_oidc_data: str | None = Header(default=None)) -> JSONResponse:
+        _user_from_header(x_amzn_oidc_data)
+        try:
+            alert = service.get_alert(alert_id)
+        except NotFound as exc:
+            raise HTTPException(status_code=404, detail="alert not found") from exc
+        incident = None
+        if alert.incident_id:
+            try:
+                incident = service.get(alert.incident_id)
+            except NotFound:
+                incident = None
+        return _json(_alert_detail(alert, incident))
 
     @app.get("/incidents")
     async def list_incidents(
@@ -257,13 +277,53 @@ def _incident_detail(incident: Incident) -> dict[str, Any]:
             "sourceId": incident.source_id,
             "alarmArn": incident.alarm_arn,
             "evidence": [item.model_dump(by_alias=True) for item in incident.evidence],
+            "triage": incident.triage.model_dump() if incident.triage else None,
             "plan": incident.plan.model_dump(by_alias=True),
             "approverSubject": incident.approver_subject,
             "report": incident.report,
             "errorMessage": incident.error_message,
+            "postIncidentStatus": _post_incident_status(incident),
+            "postIncidentSummary": incident.report or incident.error_message,
         }
     )
     return detail
+
+
+def _alert_summary(alert: ManagedAlert) -> dict[str, Any]:
+    return {
+        "id": alert.id,
+        "sourceId": alert.source_id,
+        "sourceType": alert.source_type,
+        "alarmArn": alert.alarm_arn,
+        "alarmName": alert.alarm_name,
+        "cloudwatchState": alert.cloudwatch_state,
+        "hostId": alert.host_id,
+        "reason": alert.reason,
+        "status": alert.status.value,
+        "groupKey": alert.group_key,
+        "incidentId": alert.incident_id,
+        "errorSummary": alert.error_summary,
+        "occurredAt": alert.occurred_at,
+        "createdAt": alert.created_at,
+        "updatedAt": alert.updated_at,
+    }
+
+
+def _alert_detail(alert: ManagedAlert, incident: Incident | None) -> dict[str, Any]:
+    detail = _alert_summary(alert)
+    detail["incident"] = _incident_detail(incident) if incident else None
+    return detail
+
+
+def _post_incident_status(incident: Incident) -> str:
+    if incident.state in {
+        IncidentState.COMPLETED,
+        IncidentState.RECOVERED,
+        IncidentState.REJECTED,
+        IncidentState.FAILED,
+    }:
+        return incident.state.value
+    return ""
 
 
 def _same_origin(request: Request) -> None:

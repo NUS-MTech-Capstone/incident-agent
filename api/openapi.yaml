@@ -28,6 +28,48 @@ paths:
                 $ref: "#/components/schemas/ReadyResponse"
         "503":
           description: Service dependency check failed.
+  /alerts:
+    get:
+      summary: List managed-server alerts
+      security:
+        - albCognito: []
+      responses:
+        "200":
+          description: Sanitized managed-server alert metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [alerts]
+                properties:
+                  alerts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ManagedAlert"
+        "401":
+          description: Missing or invalid Cognito identity.
+  /alerts/{alertId}:
+    get:
+      summary: Show managed-server alert detail
+      security:
+        - albCognito: []
+      parameters:
+        - name: alertId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Sanitized alert detail and linked incident when available.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedAlertDetail"
+        "401":
+          description: Missing or invalid Cognito identity.
+        "404":
+          description: Alert not found.
   /incidents:
     get:
       summary: List incidents
@@ -215,7 +257,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/IncidentSummary"
         - type: object
-          required: [sourceId, alarmArn, evidence, plan, approverSubject, report, errorMessage]
+          required: [sourceId, alarmArn, evidence, triage, plan, approverSubject, report, errorMessage, postIncidentStatus, postIncidentSummary]
           properties:
             sourceId:
               type: string
@@ -225,6 +267,10 @@ components:
               type: array
               items:
                 $ref: "#/components/schemas/OperationResult"
+            triage:
+              anyOf:
+                - $ref: "#/components/schemas/Triage"
+                - type: "null"
             plan:
               $ref: "#/components/schemas/Plan"
             approverSubject:
@@ -233,6 +279,73 @@ components:
               type: string
             errorMessage:
               type: string
+            postIncidentStatus:
+              type: string
+            postIncidentSummary:
+              type: string
+    ManagedAlert:
+      type: object
+      required: [id, sourceId, sourceType, alarmArn, alarmName, cloudwatchState, hostId, reason, status, groupKey, incidentId, errorSummary, occurredAt, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        sourceId:
+          type: string
+        sourceType:
+          type: string
+          enum: [managed-server]
+        alarmArn:
+          type: string
+        alarmName:
+          type: string
+        cloudwatchState:
+          type: string
+          enum: [ALARM, OK]
+        hostId:
+          type: string
+        reason:
+          type: string
+        status:
+          type: string
+          enum: [RECEIVED, TRIAGING, TRIAGED, PENDING_APPROVAL, EXECUTING, RESOLVED, REJECTED, FAILED]
+        groupKey:
+          type: string
+        incidentId:
+          type: string
+        errorSummary:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ManagedAlertDetail:
+      allOf:
+        - $ref: "#/components/schemas/ManagedAlert"
+        - type: object
+          required: [incident]
+          properties:
+            incident:
+              anyOf:
+                - $ref: "#/components/schemas/IncidentDetail"
+                - type: "null"
+    Triage:
+      type: object
+      required: [priority, category, summary, rationale]
+      properties:
+        priority:
+          type: string
+          enum: [low, medium, high, critical]
+        category:
+          type: string
+        summary:
+          type: string
+        rationale:
+          type: string
     Plan:
       type: object
       required: [summary, rationale, actions]

@@ -97,5 +97,6 @@ def alert(source_id: str = "source-1", state: str = "ALARM") -> Alert:
         state=state,  # type: ignore[arg-type]
         reason="service unhealthy",
         host_id="host-1",
+        group_key="managed-server|host-1|High 5xx",
         occurred_at=datetime.now(UTC),
     )

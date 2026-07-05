@@ -88,7 +88,9 @@ def _sns_body(state: str) -> str:
                 {
                     "AlarmArn": "arn:alarm",
                     "AlarmName": "High 5xx",
-                    "AlarmDescription": json.dumps({"hostId": "host-1", "runbookVersion": "v1"}),
+                    "AlarmDescription": json.dumps(
+                        {"source": "managed-server", "hostId": "host-1", "runbookVersion": "v1"}
+                    ),
                     "NewStateValue": state,
                     "NewStateReason": "service unhealthy",
                     "StateChangeTime": "2026-07-04T00:00:00Z",

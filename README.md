@@ -8,11 +8,12 @@ bounded: the model can classify, summarize evidence, and propose a structured
 plan, but authority to mutate infrastructure or target hosts remains outside
 the model and behind explicit validation plus human approval.
 
-The service consumes CloudWatch alarm notifications from SQS, gathers bounded
-diagnostics through the existing DenDenMushi automation path, asks Bedrock
-through LangChain for structured triage and plan output, stores the incident in
-Postgres, and exposes Cognito-protected approval pages plus JSON endpoints for
-the Angular Agentic AI UI.
+The service consumes managed-server CloudWatch alarm notifications from SQS,
+gathers bounded diagnostics through the existing DenDenMushi automation path,
+asks Bedrock through LangChain for structured triage and plan output, stores
+sanitized alert and incident metadata in Postgres, and exposes
+Cognito-protected approval pages plus JSON endpoints for the Angular Agentic AI
+UI.
 
 The model never receives authority to execute free-form shell commands. The
 only mutating v1 operation is `restart_service`, and it runs only after a human
@@ -57,12 +58,17 @@ the root `prompts/` directory and the Docker image copies it to `/app/prompts`.
 CloudWatch alarm descriptions must be JSON:
 
 ```json
-{"hostId":"host-dev-1","runbookVersion":"v1"}
+{"source":"managed-server","hostId":"host-dev-1","runbookVersion":"v1"}
 ```
 
-The monitored 3-tier Terraform stack should own its alarms and pass the
-DenDenMushi `incident_alerts_topic_arn` output into `alarm_actions` and
-`ok_actions`. See `examples/three-tier-alarm`.
+Only alarms with `source=managed-server` are turned into alert and incident
+records. Other CloudWatch alarms delivered to the central queue are
+acknowledged and ignored so DenDenMushi platform alarms do not appear in the
+managed-server alert inbox.
+
+Target host Terraform should pass the DenDenMushi
+`incident_alerts_topic_arn` output into its alarm actions so target ALARM/OK
+transitions land in the central incident queue.
 
 ## Workflow
 
@@ -123,12 +129,28 @@ SQS failures are left for normal queue redelivery and DLQ handling. Inspect the
 Terraform-created DLQ when `SQSMessageFailures` alarms, fix the parser or
 upstream alarm description, then replay messages by redriving them from the DLQ.
 
+Alert rows store sanitized metadata only: source identifiers, managed-server
+source type, alarm ARN/name, CloudWatch state, host ID, reason, status,
+group key, linked incident ID, error summary, and timestamps. Raw SNS/SQS
+payloads are not retained.
+
+Alert statuses:
+
+```text
+RECEIVED -> TRIAGING -> PENDING_APPROVAL -> EXECUTING -> RESOLVED
+RECEIVED -> TRIAGING -> TRIAGED
+RECEIVED -> TRIAGING -> FAILED
+PENDING_APPROVAL -> REJECTED
+```
+
 ## Routes
 
 ```http
 GET  /healthz
 GET  /readyz
 GET  /openapi.yaml
+GET  /alerts
+GET  /alerts/{alertId}
 GET  /incidents
 GET  /incidents/{incidentId}
 POST /incidents/{incidentId}/approve
@@ -137,15 +159,19 @@ POST /incidents/{incidentId}/reject
 
 The incident list and detail routes preserve their HTML responses for direct
 browser review. When called with `Accept: application/json`, they return safe
-incident summaries/details for the Angular Agentic AI tab. Approval routes
-accept either HTML form data or JSON:
+incident summaries/details for the Angular Agentic AI tab. The JSON incident
+detail includes stored triage summary/rationale, proposed plan, evidence,
+approval metadata, and post-incident report/error fields. Approval routes accept
+either HTML form data or JSON:
 
 ```json
 {"planHash":"<exact stored plan hash>"}
 ```
 
-JSON approval and rejection responses return the updated incident detail. The
-JSON surface intentionally omits automation operation URLs, capability tokens,
+JSON approval and rejection responses return the updated incident detail.
+`/alerts` and `/alerts/{alertId}` return sanitized managed-server alert
+metadata and the linked incident detail when one exists. The JSON surface
+intentionally omits raw payloads, automation operation URLs, capability tokens,
 secrets, prompts, and terminal streams.
 
 The incident routes trust Cognito identity headers supplied by the authenticated

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from incident_agent.models import Alert
 
 
-def parse_sqs_body(body: str) -> Alert:
+def parse_sqs_body(body: str) -> Alert | None:
     envelope = json.loads(body)
     message_id = envelope.get("MessageId")
     message = envelope.get("Message")
@@ -16,29 +16,46 @@ def parse_sqs_body(body: str) -> Alert:
     alarm = json.loads(message)
     state = alarm.get("NewStateValue")
     if state not in {"ALARM", "OK"}:
-        raise ValueError("unsupported CloudWatch alarm notification")
+        return None
 
     alarm_arn = alarm.get("AlarmArn") or ""
     alarm_name = alarm.get("AlarmName") or ""
     if not alarm_arn or not alarm_name:
         raise ValueError("CloudWatch alarm ARN and name are required")
 
-    metadata = json.loads(alarm.get("AlarmDescription") or "{}")
+    metadata = _metadata(alarm.get("AlarmDescription") or "")
+    if metadata.get("source") != "managed-server":
+        return None
     host_id = metadata.get("hostId") or ""
     if not host_id:
         raise ValueError("alarm metadata hostId is required")
 
     changed_at = _parse_time(alarm.get("StateChangeTime") or "")
+    source_type = "managed-server"
     return Alert(
         source_id=f"{alarm_arn}|{alarm.get('StateChangeTime', '')}|{state}",
+        source_type=source_type,
         alarm_arn=alarm_arn,
         alarm_name=alarm_name,
         state=state,
         reason=alarm.get("NewStateReason") or "",
         host_id=host_id,
         runbook_version=metadata.get("runbookVersion") or "",
+        group_key=f"{source_type}|{host_id}|{alarm_name}",
         occurred_at=changed_at,
     )
+
+
+def _metadata(value: str) -> dict[str, str]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key): str(item) for key, item in parsed.items()}
 
 
 def _parse_time(value: str) -> datetime:

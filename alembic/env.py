@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 
-from incident_agent.store import metadata
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from incident_agent.config import load_settings
+from incident_agent.persistence.store import metadata
 
 config = context.config
 if config.config_file_name is not None:

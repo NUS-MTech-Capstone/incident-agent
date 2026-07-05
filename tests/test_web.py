@@ -6,7 +6,7 @@ import json
 from fastapi.testclient import TestClient
 
 from incident_agent.api.web import create_app
-from incident_agent.models import IncidentState, Plan
+from incident_agent.models import AlertStatus, IncidentState, Plan
 from incident_agent.persistence.store import IncidentStore
 from incident_agent.planning.supervisor import plan_hash
 from tests.conftest import FakeDDM, StaticPlanner, alert, make_service
@@ -66,8 +66,34 @@ def test_json_routes_return_safe_incident_payloads(store: IncidentStore) -> None
     payload = detail.json()
     assert payload["id"] == incident_id
     assert payload["plan"]["actions"][0]["operationId"] == "restart_service"
+    assert payload["triage"] is None
+    assert payload["postIncidentStatus"] == ""
+    assert payload["postIncidentSummary"] == ""
     assert "operationsUrl" not in payload
     assert "capabilityToken" not in payload
+
+
+def test_json_alert_routes_return_sanitized_payloads(store: IncidentStore) -> None:
+    client, incident_id, _ = _client_with_incident(store)
+    managed_alert = store.create_alert(alert(source_id="alert-source"))
+    store.link_alert(managed_alert.id, incident_id)
+    store.set_alert_status(managed_alert.id, AlertStatus.PENDING_APPROVAL)
+    headers = {"x-amzn-oidc-data": _oidc(["SecurityAnalyst"]), "Accept": "application/json"}
+
+    listing = client.get("/alerts", headers=headers)
+    assert listing.status_code == 200
+    item = listing.json()["alerts"][0]
+    assert item["id"] == managed_alert.id
+    assert item["sourceType"] == "managed-server"
+    assert item["status"] == AlertStatus.PENDING_APPROVAL.value
+    assert item["incidentId"] == incident_id
+    assert "rawPayload" not in item
+
+    detail = client.get(f"/alerts/{managed_alert.id}", headers=headers)
+    assert detail.status_code == 200
+    payload = detail.json()
+    assert payload["incident"]["id"] == incident_id
+    assert "operationsUrl" not in payload["incident"]
 
 
 def test_json_decisions_require_manager_or_admin_group(store: IncidentStore) -> None:

@@ -17,6 +17,17 @@ class IncidentState(StrEnum):
     FAILED = "FAILED"
 
 
+class AlertStatus(StrEnum):
+    RECEIVED = "RECEIVED"
+    TRIAGING = "TRIAGING"
+    TRIAGED = "TRIAGED"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    EXECUTING = "EXECUTING"
+    RESOLVED = "RESOLVED"
+    REJECTED = "REJECTED"
+    FAILED = "FAILED"
+
+
 class Priority(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
@@ -26,12 +37,14 @@ class Priority(StrEnum):
 
 class Alert(BaseModel):
     source_id: str
+    source_type: str = "managed-server"
     alarm_arn: str
     alarm_name: str
     state: Literal["ALARM", "OK"]
     reason: str = ""
     host_id: str
     runbook_version: str = ""
+    group_key: str = ""
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -95,6 +108,7 @@ class Incident(BaseModel):
     run_id: str = ""
     operations_url: str = ""
     evidence: list[OperationResult] = Field(default_factory=list)
+    triage: TriageResult | None = None
     plan: Plan = Field(default_factory=Plan)
     plan_hash: str = ""
     approver_subject: str = ""
@@ -102,6 +116,24 @@ class Incident(BaseModel):
     approval_at: datetime | None = None
     report: str = ""
     error_message: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class ManagedAlert(BaseModel):
+    id: str
+    source_id: str
+    source_type: str
+    alarm_arn: str
+    alarm_name: str
+    cloudwatch_state: Literal["ALARM", "OK"]
+    host_id: str
+    reason: str = ""
+    status: AlertStatus
+    group_key: str
+    incident_id: str = ""
+    error_summary: str = ""
+    occurred_at: datetime
     created_at: datetime
     updated_at: datetime
 

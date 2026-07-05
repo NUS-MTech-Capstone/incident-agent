@@ -50,7 +50,10 @@ class SQSConsumer:
                     with use_request_id(request_id):
                         try:
                             alert = parse_sqs_body(message["Body"])
-                            await self.service.handle_alert(alert)
+                            if alert is not None:
+                                await self.service.handle_alert(alert)
+                            else:
+                                logger.info("ignored non-managed alert notification")
                             await asyncio.to_thread(
                                 self.client.delete_message,
                                 QueueUrl=self.queue_url,

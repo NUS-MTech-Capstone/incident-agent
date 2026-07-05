@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import logging
 import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 from incident_agent.automation.ddm import DDMClient
-from incident_agent.models import Alert, Incident, IncidentState, OperationResult, Plan
+from incident_agent.models import (
+    Alert,
+    AlertStatus,
+    Incident,
+    IncidentState,
+    ManagedAlert,
+    OperationResult,
+    Plan,
+    TriageResult,
+)
 from incident_agent.observability import emit_metric, log_event
 from incident_agent.persistence.store import Conflict, Duplicate, IncidentStore, NotFound
 from incident_agent.planning.supervisor import REMEDIATION_OPERATIONS, VERIFY_OPERATIONS, validate_execution
@@ -36,8 +46,16 @@ class IncidentService:
 
     async def handle_alert(self, alert: Alert) -> None:
         emit_metric("IncidentReceived", 1, hostId=alert.host_id)
+        alert.reason = redact_text(alert.reason, 4096)
+        try:
+            managed_alert = self.store.create_alert(alert)
+        except Duplicate:
+            return
         if alert.state == "OK":
             recovered = self.store.recover_by_alarm(alert.alarm_arn)
+            if recovered:
+                self.store.link_alert(managed_alert.id, recovered[0].id)
+            self.store.set_alert_status(managed_alert.id, AlertStatus.RESOLVED)
             for incident in recovered:
                 if incident.run_id:
                     try:
@@ -46,11 +64,12 @@ class IncidentService:
                     except Exception as exc:  # noqa: BLE001 - close is best effort during recovery
                         logger.warning("incident run close after recovery failed: %s", exc)
             return
-        alert.reason = redact_text(alert.reason, 4096)
         try:
+            self.store.set_alert_status(managed_alert.id, AlertStatus.TRIAGING)
             incident = self.store.create(alert)
         except Duplicate:
             return
+        self.store.link_alert(managed_alert.id, incident.id)
         log_event(
             logger,
             "IncidentReceived",
@@ -62,6 +81,7 @@ class IncidentService:
             result = await self.workflow.diagnose(incident)
             updated_incident = result["incident"]
             plan = Plan.model_validate(result["plan"])
+            triage = TriageResult.model_validate(result["triage"]) if result.get("triage") else None
             self.store.set_diagnosis(
                 incident.id,
                 updated_incident.run_id,
@@ -69,6 +89,12 @@ class IncidentService:
                 result.get("evidence", []),
                 plan,
                 result["plan_hash"],
+                triage,
+            )
+            self.store.set_alert_status(
+                managed_alert.id,
+                AlertStatus.PENDING_APPROVAL if plan.actions else AlertStatus.TRIAGED,
+                incident_id=incident.id,
             )
             if not plan.actions and updated_incident.run_id:
                 await self.ddm.close_run(updated_incident.run_id, await self._best_effort_close_token(updated_incident))
@@ -77,12 +103,19 @@ class IncidentService:
                 current = self.store.get(incident.id)
                 if current.state != IncidentState.RECOVERED:
                     self.store.set_failure(incident.id, redact_text(str(exc), 2048))
+                    self.store.set_alert_status(managed_alert.id, AlertStatus.FAILED, redact_text(str(exc), 2048))
             except (Conflict, NotFound):
                 pass
             raise
 
     def list(self) -> list[Incident]:
         return self.store.list(100)
+
+    def list_alerts(self) -> builtins.list[ManagedAlert]:
+        return self.store.list_alerts(100)
+
+    def get_alert(self, alert_id: str) -> ManagedAlert:
+        return self.store.get_alert(alert_id)
 
     def get(self, incident_id: str) -> Incident:
         return self.store.get(incident_id)
@@ -92,6 +125,7 @@ class IncidentService:
 
     def approve(self, incident_id: str, plan_hash: str, subject: str) -> None:
         self.store.approve(incident_id, plan_hash, subject)
+        self.store.set_alert_status_for_incident(incident_id, AlertStatus.EXECUTING)
         emit_metric("PlanApproved", 1, incidentId=incident_id)
         log_event(
             logger, "PlanApproved", incidentId=incident_id, planHash=plan_hash, state=IncidentState.EXECUTING.value
@@ -100,6 +134,7 @@ class IncidentService:
 
     def reject(self, incident_id: str, plan_hash: str, subject: str) -> None:
         self.store.reject(incident_id, plan_hash, subject)
+        self.store.set_alert_status_for_incident(incident_id, AlertStatus.REJECTED)
         emit_metric("PlanRejected", 1, incidentId=incident_id)
         log_event(
             logger, "PlanRejected", incidentId=incident_id, planHash=plan_hash, state=IncidentState.REJECTED.value
@@ -145,6 +180,11 @@ class IncidentService:
             state = IncidentState.COMPLETED if success else IncidentState.FAILED
             error = "" if success else "post-remediation verification failed"
             self.store.set_report(incident_id, state, _build_report(incident, restart, verification), error)
+            self.store.set_alert_status_for_incident(
+                incident_id,
+                AlertStatus.RESOLVED if success else AlertStatus.FAILED,
+                error,
+            )
             await self.ddm.close_run(incident.run_id, verify_token.capability_token)
             duration_ms = (time.monotonic() - started) * 1000
             if success:
@@ -183,6 +223,7 @@ class IncidentService:
                 "Approved remediation could not be completed.",
                 redact_text(str(exc), 2048),
             )
+            self.store.set_alert_status_for_incident(incident_id, AlertStatus.FAILED, redact_text(str(exc), 2048))
             emit_metric("RemediationFailed", 1, incidentId=incident.id, runId=incident.run_id, hostId=incident.host_id)
             log_event(
                 logger,
@@ -208,7 +249,11 @@ class IncidentService:
             logger.warning("incident run close after rejection failed: %s", exc)
 
 
-def _build_report(incident: Incident, restart: OperationResult, verification: list[OperationResult]) -> str:
+def _build_report(
+    incident: Incident,
+    restart: OperationResult,
+    verification: builtins.list[OperationResult],
+) -> str:
     lines = [
         f"Incident {incident.id} on host {incident.host_id}",
         "",
