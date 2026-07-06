@@ -16,9 +16,9 @@ from incident_agent.models import (
     ApprovalDecisionAudit,
     ApprovalOutcome,
     Incident,
-    IncidentExplanation,
     IncidentEvent,
     IncidentEventType,
+    IncidentExplanation,
     IncidentState,
     ManagedAlert,
     OperationResult,
@@ -28,8 +28,8 @@ from incident_agent.models import (
 )
 from incident_agent.observability import emit_metric, log_event
 from incident_agent.persistence.store import Conflict, Duplicate, IncidentStore, NotFound
+from incident_agent.planning.agents import RemediationExecutorAgent
 from incident_agent.planning.catalog import VERIFY_OPERATIONS
-from incident_agent.planning.supervisor import validate_execution
 from incident_agent.planning.workflow import IncidentWorkflow
 from incident_agent.redact import text as redact_text
 
@@ -53,6 +53,7 @@ class IncidentService:
         self.operation_timeout = operation_timeout
         self.max_operation_output = max_operation_output
         self.task_runner: Callable[[Coroutine[Any, Any, None]], None] = task_runner or _schedule_task
+        self.remediation_executor_agent = RemediationExecutorAgent()
         self.queue_consumer_configured = False
         self.queue_consumer_running = False
         self.last_error_summary = ""
@@ -363,7 +364,7 @@ class IncidentService:
                 message="Approved remediation execution started.",
                 metadata={"planHash": approved_plan_hash},
             )
-            validate_execution(incident, approved_plan_hash)
+            self.remediation_executor_agent.validate(incident, approved_plan_hash)
             remediation_operation = incident.plan.actions[0].operation_id
             token = await self.ddm.issue_token(
                 incident.run_id,

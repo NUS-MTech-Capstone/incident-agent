@@ -13,8 +13,16 @@ from incident_agent.models import (
     OperationResult,
     Plan,
 )
-from incident_agent.planning.catalog import DIAGNOSTIC_OPERATIONS
 from incident_agent.persistence.store import Conflict, IncidentStore, incidents
+from incident_agent.planning.agents import (
+    ACTION_PLAN_AGENT,
+    ACTION_PLAN_REVIEWER_AGENT,
+    EVIDENCE_COLLECTOR_AGENT,
+    INCIDENT_MANAGER_AGENT,
+    REMEDIATION_EXECUTOR_AGENT,
+    TRIAGE_AGENT,
+)
+from incident_agent.planning.catalog import DIAGNOSTIC_OPERATIONS
 from incident_agent.planning.supervisor import plan_hash
 from tests.conftest import FakeDDM, StaticPlanner, alert, make_service
 
@@ -44,11 +52,25 @@ async def test_full_workflow_no_action_completes_and_closes(
     assert incident.explanation.model.planner_type == "rule_based"
     assert incident.explanation.workflow.catalog_version == "v1"
     assert incident.explanation.workflow.diagnostic_operations == DIAGNOSTIC_OPERATIONS
+    assert [agent.name for agent in incident.explanation.agents] == [
+        INCIDENT_MANAGER_AGENT,
+        TRIAGE_AGENT,
+        EVIDENCE_COLLECTOR_AGENT,
+        ACTION_PLAN_AGENT,
+        ACTION_PLAN_REVIEWER_AGENT,
+        REMEDIATION_EXECUTOR_AGENT,
+    ]
+    assert all(agent.purpose and agent.reasoning_type and agent.memory for agent in incident.explanation.agents)
+    assert any(agent.tools for agent in incident.explanation.agents)
     assert any(
         decision.operation_id == "target_probe" and decision.chosen_by == "policy"
         for decision in incident.explanation.tool_decisions
     )
-    assert "diagnose-token" not in incident.explanation.model_dump_json()
+    explanation_json = incident.explanation.model_dump_json()
+    assert "diagnose-token" not in explanation_json
+    assert "SystemMessage" not in explanation_json
+    assert "HumanMessage" not in explanation_json
+    assert "terminal stream" not in explanation_json.lower()
     assert ddm.closed
     metrics = capsys.readouterr().out
     assert "IncidentReceived" in metrics

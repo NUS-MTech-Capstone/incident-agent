@@ -8,7 +8,6 @@ from langgraph.graph import END, START, StateGraph
 
 from incident_agent.automation.ddm import DDMClient
 from incident_agent.models import (
-    ExplanationGuardrail,
     ExplanationModel,
     ExplanationToolDecision,
     ExplanationWorkflow,
@@ -17,10 +16,15 @@ from incident_agent.models import (
     OperationResult,
 )
 from incident_agent.observability import emit_metric, log_event
+from incident_agent.planning.agents import (
+    ActionPlanAgent,
+    ActionPlanReviewerAgent,
+    EvidenceCollectorAgent,
+    TriageAgent,
+    agent_definitions,
+)
 from incident_agent.planning.catalog import CATALOG_VERSION, DIAGNOSTIC_OPERATIONS, VERIFY_OPERATIONS
 from incident_agent.planning.planner import Planner
-from incident_agent.planning.supervisor import plan_hash
-from incident_agent.redact import text as redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,10 @@ class IncidentWorkflow:
         self.ddm = ddm
         self.operation_timeout = operation_timeout
         self.max_operation_output = max_operation_output
+        self.triage_agent = TriageAgent(planner)
+        self.evidence_collector_agent = EvidenceCollectorAgent(ddm, max_operation_output)
+        self.action_plan_agent = ActionPlanAgent(planner)
+        self.action_plan_reviewer_agent = ActionPlanReviewerAgent()
         self.graph = self._build_graph()
 
     async def diagnose(self, incident: Incident) -> WorkflowState:
@@ -66,7 +74,7 @@ class IncidentWorkflow:
     async def _triage(self, state: WorkflowState) -> WorkflowState:
         incident = state["incident"]
         started = time.monotonic()
-        triage = await self.planner.triage(state["incident"])
+        triage = await self.triage_agent.run(state["incident"])
         duration_ms = (time.monotonic() - started) * 1000
         emit_metric("IncidentTriaged", 1, incidentId=incident.id, hostId=incident.host_id)
         log_event(
@@ -82,85 +90,42 @@ class IncidentWorkflow:
     async def _gather_evidence(self, state: WorkflowState) -> WorkflowState:
         incident = state["incident"]
         started = time.monotonic()
-        run = await self.ddm.start_run(incident.id, incident.host_id, DIAGNOSTIC_OPERATIONS)
-        incident.run_id = run.run_id
-        incident.operations_url = run.operations_url
-        evidence: list[OperationResult] = []
-        decisions: list[ExplanationToolDecision] = []
-        for operation in DIAGNOSTIC_OPERATIONS:
-            decisions.append(
-                ExplanationToolDecision(
-                    operationId=operation,
-                    phase="diagnose",
-                    chosenBy="policy",
-                    reason="Default bounded diagnostic operation from the v1 catalog.",
-                )
-            )
-            try:
-                result = await self.ddm.execute(
-                    run.operations_url,
-                    run.run_id,
-                    run.capability_token,
-                    operation,
-                    "",
-                )
-            except Exception as exc:  # noqa: BLE001 - diagnostic failures are evidence
-                result = OperationResult(operationId=operation, stderr=str(exc), exitCode=-1)
-            result.stdout = redact_text(result.stdout, self.max_operation_output)
-            result.stderr = redact_text(result.stderr, self.max_operation_output)
-            evidence.append(result)
+        collected = await self.evidence_collector_agent.run(incident)
         duration_ms = (time.monotonic() - started) * 1000
-        emit_metric("EvidenceCollected", 1, incidentId=incident.id, runId=run.run_id, hostId=incident.host_id)
+        emit_metric(
+            "EvidenceCollected",
+            1,
+            incidentId=collected.incident.id,
+            runId=collected.incident.run_id,
+            hostId=collected.incident.host_id,
+        )
         log_event(
             logger,
             "EvidenceCollected",
-            incidentId=incident.id,
-            runId=run.run_id,
-            hostId=incident.host_id,
-            state=incident.state.value,
+            incidentId=collected.incident.id,
+            runId=collected.incident.run_id,
+            hostId=collected.incident.host_id,
+            state=collected.incident.state.value,
             durationMs=round(duration_ms, 2),
         )
         explanation = _base_explanation(self.planner)
-        explanation.workflow.run_id = run.run_id
-        explanation.tool_decisions.extend(decisions)
-        return {"incident": incident, "evidence": evidence, "explanation": explanation.model_dump(by_alias=True)}
+        explanation.workflow.run_id = collected.incident.run_id
+        explanation.tool_decisions.extend(collected.decisions)
+        return {
+            "incident": collected.incident,
+            "evidence": collected.evidence,
+            "explanation": explanation.model_dump(by_alias=True),
+        }
 
     async def _propose_plan(self, state: WorkflowState) -> WorkflowState:
         incident = state["incident"]
         started = time.monotonic()
-        plan = await self.planner.plan(incident, state.get("evidence", []))
-        hashed_plan = plan_hash(plan)
+        candidate_plan = await self.action_plan_agent.run(incident, state.get("evidence", []))
+        reviewed = self.action_plan_reviewer_agent.run(candidate_plan)
         explanation = IncidentExplanation.model_validate(state.get("explanation", {}))
-        explanation.workflow.plan_hash = hashed_plan
-        explanation.guardrails.extend(
-            [
-                ExplanationGuardrail(
-                    name="catalog_validation",
-                    passed=True,
-                    reason="Plan actions were validated against the remediation catalog.",
-                ),
-                ExplanationGuardrail(
-                    name="command_like_content",
-                    passed=True,
-                    reason="Plan text was checked for command-like content before storage.",
-                ),
-                ExplanationGuardrail(
-                    name="max_single_remediation_action",
-                    passed=True,
-                    reason="The supervisor allows at most one remediation operation.",
-                ),
-                ExplanationGuardrail(
-                    name="approval_required",
-                    passed=True,
-                    reason=(
-                        "Mutating remediation requires Manager or Admin approval of the exact plan hash."
-                        if plan.actions
-                        else "No mutating remediation was proposed, so approval is not required."
-                    ),
-                ),
-            ]
-        )
-        for action in plan.actions:
+        explanation.workflow.plan_hash = reviewed.plan_hash
+        explanation.guardrails.extend(reviewed.guardrails)
+        for action in reviewed.plan.actions:
             explanation.tool_decisions.append(
                 ExplanationToolDecision(
                     operationId=action.operation_id,
@@ -186,13 +151,13 @@ class IncidentWorkflow:
             incidentId=incident.id,
             runId=incident.run_id,
             hostId=incident.host_id,
-            planHash=hashed_plan,
+            planHash=reviewed.plan_hash,
             state=incident.state.value,
             durationMs=round(duration_ms, 2),
         )
         return {
-            "plan": plan.model_dump(by_alias=True),
-            "plan_hash": hashed_plan,
+            "plan": reviewed.plan.model_dump(by_alias=True),
+            "plan_hash": reviewed.plan_hash,
             "explanation": explanation.model_dump(by_alias=True),
         }
 
@@ -207,6 +172,7 @@ def _base_explanation(planner: Planner) -> IncidentExplanation:
         model = explain_model()
     return IncidentExplanation(
         model=model,
+        agents=agent_definitions(model.planner_type),
         workflow=ExplanationWorkflow(
             graphVersion="v1",
             catalogVersion=CATALOG_VERSION,

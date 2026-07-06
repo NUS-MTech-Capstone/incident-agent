@@ -72,19 +72,26 @@ Target host Terraform should pass the DenDenMushi
 `incident_alerts_topic_arn` output into its alarm actions so target ALARM/OK
 transitions land in the central incident queue.
 
-## Workflow
+## Multi-Agent Workflow
 
 ```text
 SQS alert
--> ingest
--> triage
--> gather_evidence using DDM automation operations
--> propose_plan using structured Bedrock output
+-> Incident Manager Agent
+-> Triage Agent
+-> Evidence Collector Agent using DDM automation operations
+-> Action Plan Agent using structured Bedrock or rule-based output
+-> Action Plan Reviewer Agent with deterministic guardrails and plan hash
 -> await human approval
--> execute the single approved v1 remediation operation
+-> Remediation Executor Agent for the single approved v1 remediation operation
 -> verify service_status and health_check
 -> close automation run
 ```
+
+The agents are named runtime roles inside this worker service, not independent
+autonomous services. This gives the capstone report a clear multi-agent design
+while preserving the existing authority boundary: the model proposes, the
+reviewer validates, Manager/Admin users approve, and scoped STS tokens authorize
+runtime execution.
 
 Allowed diagnostic operations:
 
@@ -113,9 +120,11 @@ outside the v1 remediation catalog.
 
 Each incident stores safe explainability metadata in `explanation_json`: model
 provider/type/ID, Bedrock region, prompt template hashes, catalog version,
-diagnostic and verification operation IDs, tool-selection reasons, guardrail
-outcomes, and responsibility boundaries. It intentionally excludes rendered
-prompts, model responses, tokens, command bodies, secrets, and terminal streams.
+named agent roles, reasoning types, memory scope, tools, inputs, outputs,
+handoffs, diagnostic and verification operation IDs, tool-selection reasons,
+guardrail outcomes, and responsibility boundaries. It intentionally excludes
+rendered prompts, model responses, tokens, command bodies, secrets, and
+terminal streams.
 
 ## Observability
 

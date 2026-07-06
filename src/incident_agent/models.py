@@ -40,7 +40,7 @@ class IncidentEventType(StrEnum):
     PLAN_APPROVED = "PlanApproved"
     PLAN_REJECTED = "PlanRejected"
     REMEDIATION_STARTED = "RemediationStarted"
-    AUTOMATION_TOKEN_ISSUED = "AutomationTokenIssued"
+    AUTOMATION_TOKEN_ISSUED = "AutomationTokenIssued"  # noqa: S105 - event type, not a secret
     OPERATION_EXECUTED = "OperationExecuted"
     REMEDIATION_EXECUTED = "RemediationExecuted"
     REMEDIATION_FAILED = "RemediationFailed"
@@ -177,9 +177,24 @@ class ExplanationResponsibility(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ExplanationAgent(BaseModel):
+    name: str
+    purpose: str
+    responsibilities: list[str] = Field(default_factory=list)
+    reasoning_type: str = Field(alias="reasoningType", default="")
+    memory: str = ""
+    tools: list[str] = Field(default_factory=list)
+    inputs: list[str] = Field(default_factory=list)
+    outputs: list[str] = Field(default_factory=list)
+    handoff_to: str = Field(alias="handoffTo", default="")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class IncidentExplanation(BaseModel):
     model: ExplanationModel = Field(default_factory=ExplanationModel)
     workflow: ExplanationWorkflow = Field(default_factory=ExplanationWorkflow)
+    agents: list[ExplanationAgent] = Field(default_factory=list)
     tool_decisions: list[ExplanationToolDecision] = Field(alias="toolDecisions", default_factory=list)
     guardrails: list[ExplanationGuardrail] = Field(default_factory=list)
     responsibility: ExplanationResponsibility = Field(default_factory=ExplanationResponsibility)

@@ -14,7 +14,6 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from incident_agent.models import Action, ExplanationModel, Incident, OperationResult, Plan, Priority, TriageResult
 from incident_agent.observability import emit_metric
 from incident_agent.planning.prompt_loader import PromptLoader
-from incident_agent.planning.supervisor import validate_plan
 
 
 class Planner(Protocol):
@@ -93,8 +92,7 @@ class BedrockPlanner:
             ],
             phase="plan",
         )
-        plan = Plan.model_validate_json(_strip_fence(str(message.content)))
-        return validate_plan(plan)
+        return Plan.model_validate_json(_strip_fence(str(message.content)))
 
     async def _invoke(self, messages: list[BaseMessage], phase: str) -> BaseMessage:
         last_error: Exception | None = None
@@ -146,27 +144,21 @@ class RuleBasedPlanner:
             f"{item.stdout}\n{item.stderr}".lower() for item in evidence if item.operation_id == "health_check"
         )
         if "unhealthy" in health_check and "active" in service_status:
-            return validate_plan(
-                Plan(
-                    summary="Demo app is active but unhealthy; request approval to recover the demo app.",
-                    rationale="Diagnostics show the service is active while the health endpoint reports unhealthy.",
-                    actions=[Action(operationId="recover_demo_app", reason="Demo app health check failed.")],
-                )
+            return Plan(
+                summary="Demo app is active but unhealthy; request approval to recover the demo app.",
+                rationale="Diagnostics show the service is active while the health endpoint reports unhealthy.",
+                actions=[Action(operationId="recover_demo_app", reason="Demo app health check failed.")],
             )
         if "failed" in combined or "inactive" in combined or "unhealthy" in combined:
-            return validate_plan(
-                Plan(
-                    summary="Service appears unhealthy; request approval to restart the managed service.",
-                    rationale="Diagnostics include unhealthy service indicators.",
-                    actions=[Action(operationId="restart_service", reason="Managed service health check failed.")],
-                )
+            return Plan(
+                summary="Service appears unhealthy; request approval to restart the managed service.",
+                rationale="Diagnostics include unhealthy service indicators.",
+                actions=[Action(operationId="restart_service", reason="Managed service health check failed.")],
             )
-        return validate_plan(
-            Plan(
-                summary="No remediation proposed.",
-                rationale="Diagnostics do not justify the allowed restart operation.",
-                actions=[],
-            )
+        return Plan(
+            summary="No remediation proposed.",
+            rationale="Diagnostics do not justify the allowed restart operation.",
+            actions=[],
         )
 
 
