@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     sqs_visibility_timeout_seconds: int = Field(default=600, alias="SQS_VISIBILITY_TIMEOUT_SECONDS")
     enable_sqs_consumer: bool = Field(default=True, alias="ENABLE_SQS_CONSUMER")
     langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
+    langsmith_api_key_secret_id: str = Field(default="", alias="LANGSMITH_API_KEY_SECRET_ID")
+    langsmith_project: str = Field(default="", alias="LANGSMITH_PROJECT")
+    langsmith_endpoint: str = Field(default="", alias="LANGSMITH_ENDPOINT")
+    langsmith_workspace_id: str = Field(default="", alias="LANGSMITH_WORKSPACE_ID")
 
     model_config = SettingsConfigDict(extra="ignore", populate_by_name=True)
 

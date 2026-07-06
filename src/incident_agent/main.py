@@ -10,6 +10,7 @@ from incident_agent.api.web import create_app
 from incident_agent.automation.ddm import DDMClient
 from incident_agent.config import load_settings
 from incident_agent.ingest.sqs import SQSConsumer
+from incident_agent.langsmith import configure_langsmith
 from incident_agent.observability import configure_logging
 from incident_agent.persistence.store import IncidentStore
 from incident_agent.planning.planner import BedrockPlanner
@@ -19,6 +20,7 @@ from incident_agent.service import IncidentService
 
 def build_service() -> IncidentService:
     settings = load_settings()
+    configure_langsmith(settings)
     database_url = settings.database_url or _database_url_from_secret(
         settings.database_secret_id,
         settings.aws_region,

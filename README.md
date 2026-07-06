@@ -47,10 +47,21 @@ SQS_POLL_WAIT_SECONDS=20
 SQS_VISIBILITY_TIMEOUT_SECONDS=600
 ENABLE_SQS_CONSUMER=true
 LANGSMITH_TRACING=false
+LANGSMITH_API_KEY_SECRET_ID=
+LANGSMITH_PROJECT=
+LANGSMITH_ENDPOINT=
+LANGSMITH_WORKSPACE_ID=
 ```
 
 `DATABASE_SECRET_ID` must contain the raw Postgres connection URL. Prefer it to
 `DATABASE_URL` in EKS.
+
+When `LANGSMITH_TRACING=true`, the service reads `LANGSMITH_API_KEY` from the
+environment or fetches it from `LANGSMITH_API_KEY_SECRET_ID` in AWS Secrets
+Manager before constructing the LangChain Bedrock client. If no key is
+available, tracing is disabled and the worker continues so incident processing
+is not blocked by optional observability. The API key, secret ID, prompts, model
+responses, and diagnostic output are not logged.
 
 Bedrock prompt templates live under the repository root `prompts/` directory.
 `INCIDENT_AGENT_PROMPTS_DIR` may point at another template directory for local
@@ -140,10 +151,11 @@ Metrics use low-cardinality dimensions only (`Service=incident-agent` and
 stdout/stderr, and terminal streams must not be logged.
 
 LangSmith can be enabled for local or staging prompt debugging with
-`LANGSMITH_TRACING=true`, but production keeps it disabled. Bedrock invocation
-logging and OpenTelemetry/X-Ray tracing should also remain disabled by default
-because they can retain sensitive prompt or evidence data; enable them only for
-short, explicit debug windows.
+`LANGSMITH_TRACING=true`; the dev Kubernetes overlay wires the API key through
+AWS Secrets Manager. Production keeps it disabled. Bedrock invocation logging
+and OpenTelemetry/X-Ray tracing should also remain disabled by default because
+they can retain sensitive prompt or evidence data; enable them only for short,
+explicit debug windows.
 
 SQS failures are left for normal queue redelivery and DLQ handling. Inspect the
 Terraform-created DLQ when `SQSMessageFailures` alarms, fix the parser or
