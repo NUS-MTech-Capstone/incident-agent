@@ -15,9 +15,10 @@ sanitized alert and incident metadata in Postgres. The Go
 `agent-controlplane` exposes Cognito-protected approval pages plus JSON
 endpoints for the Angular Agentic AI UI.
 
-The model never receives authority to execute free-form shell commands. The
-only mutating v1 operation is `restart_service`, and it runs only after a human
-approves the exact stored plan hash. Live terminal traffic remains direct
+The model never receives authority to execute free-form shell commands.
+Mutating operations come from the code-reviewed v1 remediation catalog, and one
+catalog operation runs only after a human approves the exact stored plan hash.
+Live terminal traffic remains direct
 between the browser, Proxy Dataplane, and target host; the incident agent never
 proxies interactive terminal streams.
 
@@ -80,7 +81,7 @@ SQS alert
 -> gather_evidence using DDM automation operations
 -> propose_plan using structured Bedrock output
 -> await human approval
--> execute approved restart_service only
+-> execute the single approved v1 remediation operation
 -> verify service_status and health_check
 -> close automation run
 ```
@@ -95,17 +96,26 @@ top_processes
 service_status
 service_logs
 health_check
+target_probe
 ```
 
-Allowed remediation operation:
+Allowed v1 remediation operations:
 
 ```text
 restart_service
+recover_demo_app
+reload_service
 ```
 
 The deterministic supervisor rejects unknown tools, command-like plan content,
-plan hash drift, missing approval, and execution outside the approved operation
-order.
+plan hash drift, missing approval, multiple remediation actions, and execution
+outside the v1 remediation catalog.
+
+Each incident stores safe explainability metadata in `explanation_json`: model
+provider/type/ID, Bedrock region, prompt template hashes, catalog version,
+diagnostic and verification operation IDs, tool-selection reasons, guardrail
+outcomes, and responsibility boundaries. It intentionally excludes rendered
+prompts, model responses, tokens, command bodies, secrets, and terminal streams.
 
 ## Observability
 
@@ -134,6 +144,9 @@ Alert rows store sanitized metadata only: source identifiers, managed-server
 source type, alarm ARN/name, CloudWatch state, host ID, reason, status,
 group key, linked incident ID, grouped flag, error summary, and timestamps.
 Raw SNS/SQS payloads are not retained.
+
+`PlanValidationFailed` timeline events are metadata-only and record validation
+failure class names, not raw model output or rejected command-like text.
 
 The `groupKey` suppresses duplicate active agent runs. A managed-server `ALARM`
 for the same active group links to the existing incident and records an

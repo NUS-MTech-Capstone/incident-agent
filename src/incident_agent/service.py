@@ -16,6 +16,7 @@ from incident_agent.models import (
     ApprovalDecisionAudit,
     ApprovalOutcome,
     Incident,
+    IncidentExplanation,
     IncidentEvent,
     IncidentEventType,
     IncidentState,
@@ -27,7 +28,8 @@ from incident_agent.models import (
 )
 from incident_agent.observability import emit_metric, log_event
 from incident_agent.persistence.store import Conflict, Duplicate, IncidentStore, NotFound
-from incident_agent.planning.supervisor import REMEDIATION_OPERATIONS, VERIFY_OPERATIONS, validate_execution
+from incident_agent.planning.catalog import VERIFY_OPERATIONS
+from incident_agent.planning.supervisor import validate_execution
 from incident_agent.planning.workflow import IncidentWorkflow
 from incident_agent.redact import text as redact_text
 
@@ -135,6 +137,7 @@ class IncidentService:
             updated_incident = result["incident"]
             plan = Plan.model_validate(result["plan"])
             triage = TriageResult.model_validate(result["triage"]) if result.get("triage") else None
+            explanation = IncidentExplanation.model_validate(result.get("explanation", {}))
             plan_expires_at = datetime.now(UTC) + PLAN_APPROVAL_TTL if plan.actions else None
             self.store.set_diagnosis(
                 incident.id,
@@ -145,6 +148,7 @@ class IncidentService:
                 result["plan_hash"],
                 triage,
                 plan_expires_at,
+                explanation,
             )
             self.store.create_event(
                 incident.id,
@@ -183,6 +187,14 @@ class IncidentService:
                 if current.state != IncidentState.RECOVERED:
                     self.store.set_failure(incident.id, redact_text(str(exc), 2048))
                     self.store.set_alert_status(managed_alert.id, AlertStatus.FAILED, redact_text(str(exc), 2048))
+                    if isinstance(exc, ValueError):
+                        self.store.create_event(
+                            incident.id,
+                            IncidentEventType.PLAN_VALIDATION_FAILED,
+                            alert_id=managed_alert.id,
+                            message="Model plan output failed deterministic validation.",
+                            metadata={"errorKind": type(exc).__name__},
+                        )
                     self.store.create_event(
                         incident.id,
                         IncidentEventType.REMEDIATION_FAILED,
@@ -352,16 +364,24 @@ class IncidentService:
                 metadata={"planHash": approved_plan_hash},
             )
             validate_execution(incident, approved_plan_hash)
-            token = await self.ddm.issue_token(incident.run_id, "remediate", REMEDIATION_OPERATIONS, incident.plan_hash)
-            restart = await self.ddm.execute(
+            remediation_operation = incident.plan.actions[0].operation_id
+            token = await self.ddm.issue_token(
+                incident.run_id,
+                "remediate",
+                [remediation_operation],
+                incident.plan_hash,
+            )
+            remediation = await self.ddm.execute(
                 incident.operations_url,
                 incident.run_id,
                 token.capability_token,
-                "restart_service",
+                remediation_operation,
                 incident.plan_hash,
             )
-            if restart.exit_code != 0:
-                raise RuntimeError(f"restart_service failed with exit code {restart.exit_code}: {restart.stderr}")
+            if remediation.exit_code != 0:
+                raise RuntimeError(
+                    f"{remediation_operation} failed with exit code {remediation.exit_code}: {remediation.stderr}"
+                )
             verify_token = await self.ddm.issue_token(incident.run_id, "verify", VERIFY_OPERATIONS, "")
             verification = []
             success = True
@@ -382,11 +402,11 @@ class IncidentService:
                 success = success and result.exit_code == 0
             state = IncidentState.COMPLETED if success else IncidentState.FAILED
             error = "" if success else "post-remediation verification failed"
-            structured_report = _build_structured_report(incident, restart, verification, state, started_at)
+            structured_report = _build_structured_report(incident, remediation, verification, state, started_at)
             self.store.set_report(
                 incident_id,
                 state,
-                _build_report(incident, restart, verification),
+                _build_report(incident, remediation, verification),
                 error,
                 structured_report,
             )
@@ -519,14 +539,14 @@ class IncidentService:
 
 def _build_report(
     incident: Incident,
-    restart: OperationResult,
+    remediation: OperationResult,
     verification: builtins.list[OperationResult],
 ) -> str:
     lines = [
         f"Incident {incident.id} on host {incident.host_id}",
         "",
         f"Approved plan: {incident.plan.summary}",
-        f"Remediation: restart_service exit={restart.exit_code}",
+        f"Remediation: {remediation.operation_id} exit={remediation.exit_code}",
     ]
     lines.extend(f"Verification: {result.operation_id} exit={result.exit_code}" for result in verification)
     return "\n".join(lines)
@@ -534,7 +554,7 @@ def _build_report(
 
 def _build_structured_report(
     incident: Incident,
-    restart: OperationResult,
+    remediation: OperationResult,
     verification: builtins.list[OperationResult],
     state: IncidentState,
     started_at: datetime,
@@ -543,7 +563,7 @@ def _build_structured_report(
     verification_summary = ", ".join(f"{result.operation_id} exit={result.exit_code}" for result in verification)
     return PostIncidentReport(
         root_cause_summary=incident.triage.summary if incident.triage else incident.reason,
-        action_taken=f"restart_service exit={restart.exit_code}",
+        action_taken=f"{remediation.operation_id} exit={remediation.exit_code}",
         verification_summary=verification_summary,
         final_state=state.value,
         started_at=started_at,

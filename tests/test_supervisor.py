@@ -19,6 +19,17 @@ def test_plan_validation_rejects_unsupported_tool() -> None:
         )
 
 
+def test_plan_validation_accepts_catalog_remediation_action() -> None:
+    plan = validate_plan(
+        Plan(
+            summary="recover demo app",
+            rationale="service is active but unhealthy",
+            actions=[{"operationId": "recover_demo_app", "reason": "health_check failed"}],
+        )
+    )
+    assert plan.actions[0].operation_id == "recover_demo_app"
+
+
 def test_plan_validation_rejects_prompt_injected_shell_content() -> None:
     with pytest.raises(ValueError, match="command-like"):
         validate_plan(

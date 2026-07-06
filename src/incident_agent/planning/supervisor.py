@@ -5,19 +5,7 @@ import json
 import re
 
 from incident_agent.models import Incident, IncidentState, Plan
-
-DIAGNOSTIC_OPERATIONS = [
-    "system_overview",
-    "disk_usage",
-    "memory_usage",
-    "top_processes",
-    "service_status",
-    "service_logs",
-    "health_check",
-]
-REMEDIATION_OPERATIONS = ["restart_service"]
-VERIFY_OPERATIONS = ["service_status", "health_check"]
-SUPPORTED_OPERATIONS = set(DIAGNOSTIC_OPERATIONS + REMEDIATION_OPERATIONS + VERIFY_OPERATIONS)
+from incident_agent.planning.catalog import REMEDIATION_OPERATIONS
 
 _SHELL_PATTERN = re.compile(r"(^|\s)(sudo|bash|sh|curl|wget|nc|python|perl|ruby|rm|chmod|chown)\b|[`$|&><]")
 
@@ -33,7 +21,7 @@ def validate_plan(plan: Plan) -> Plan:
     if len(plan.actions) > 1:
         raise ValueError("only one remediation action is supported")
     for action in plan.actions:
-        if action.operation_id != "restart_service":
+        if action.operation_id not in REMEDIATION_OPERATIONS:
             raise ValueError("unsupported action")
         if not action.reason.strip():
             raise ValueError("action reason is required")
@@ -55,5 +43,5 @@ def validate_execution(incident: Incident, approved_plan_hash: str) -> None:
     if incident.plan_hash != plan_hash(incident.plan):
         raise ValueError("stored plan hash does not match plan body")
     validate_plan(incident.plan)
-    if [action.operation_id for action in incident.plan.actions] != REMEDIATION_OPERATIONS:
-        raise ValueError("approved operations are not in the allowed order")
+    if len(incident.plan.actions) != 1 or incident.plan.actions[0].operation_id not in REMEDIATION_OPERATIONS:
+        raise ValueError("approved operation is not in the remediation catalog")

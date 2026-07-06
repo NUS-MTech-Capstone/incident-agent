@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -10,7 +11,7 @@ from langchain_aws import ChatBedrock
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-from incident_agent.models import Action, Incident, OperationResult, Plan, Priority, TriageResult
+from incident_agent.models import Action, ExplanationModel, Incident, OperationResult, Plan, Priority, TriageResult
 from incident_agent.observability import emit_metric
 from incident_agent.planning.prompt_loader import PromptLoader
 from incident_agent.planning.supervisor import validate_plan
@@ -31,10 +32,26 @@ class BedrockPlanner:
         prompts_dir: str | Path = "",
         transient_retry_attempts: int = 2,
     ):
+        self.model_id = model_id
+        self.region_name = region_name
         self.model: BaseChatModel = ChatBedrock(model=model_id, region=region_name, temperature=0)
         self.max_prompt_bytes = max_prompt_bytes
         self.prompts = PromptLoader(prompts_dir or None)
         self.transient_retry_attempts = max(1, transient_retry_attempts)
+
+    def explain_model(self) -> ExplanationModel:
+        return ExplanationModel(
+            provider="bedrock",
+            plannerType="bedrock",
+            modelId=self.model_id,
+            awsRegion=self.region_name,
+            temperature=0,
+            maxPromptBytes=self.max_prompt_bytes,
+            promptTemplates={
+                name: _template_hash(self.prompts.prompts_dir / name)
+                for name in ["triage_system.md.j2", "triage_user.md.j2", "plan_system.md.j2", "plan_user.md.j2"]
+            },
+        )
 
     async def triage(self, incident: Incident) -> TriageResult:
         prompt = _bounded(
@@ -97,6 +114,16 @@ class BedrockPlanner:
 
 
 class RuleBasedPlanner:
+    def explain_model(self) -> ExplanationModel:
+        return ExplanationModel(
+            provider="deterministic",
+            plannerType="rule_based",
+            modelId="rule-based-planner",
+            temperature=None,
+            maxPromptBytes=0,
+            promptTemplates={},
+        )
+
     async def triage(self, incident: Incident) -> TriageResult:
         reason = incident.reason.lower()
         if any(term in reason for term in ["down", "unhealthy", "5xx", "500", "critical"]):
@@ -112,6 +139,20 @@ class RuleBasedPlanner:
 
     async def plan(self, incident: Incident, evidence: list[OperationResult]) -> Plan:
         combined = "\n".join(f"{item.stdout}\n{item.stderr}".lower() for item in evidence)
+        service_status = "\n".join(
+            f"{item.stdout}\n{item.stderr}".lower() for item in evidence if item.operation_id == "service_status"
+        )
+        health_check = "\n".join(
+            f"{item.stdout}\n{item.stderr}".lower() for item in evidence if item.operation_id == "health_check"
+        )
+        if "unhealthy" in health_check and "active" in service_status:
+            return validate_plan(
+                Plan(
+                    summary="Demo app is active but unhealthy; request approval to recover the demo app.",
+                    rationale="Diagnostics show the service is active while the health endpoint reports unhealthy.",
+                    actions=[Action(operationId="recover_demo_app", reason="Demo app health check failed.")],
+                )
+            )
         if "failed" in combined or "inactive" in combined or "unhealthy" in combined:
             return validate_plan(
                 Plan(
@@ -148,3 +189,10 @@ def _bounded(prompt: str, max_prompt_bytes: int) -> str:
     if max_prompt_bytes > 0 and len(prompt.encode("utf-8")) > max_prompt_bytes:
         raise ValueError("Bedrock prompt exceeds configured limit")
     return prompt
+
+
+def _template_hash(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""

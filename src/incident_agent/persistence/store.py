@@ -18,6 +18,7 @@ from incident_agent.models import (
     ApprovalDecisionAudit,
     ApprovalOutcome,
     Incident,
+    IncidentExplanation,
     IncidentEvent,
     IncidentEventType,
     IncidentState,
@@ -85,6 +86,7 @@ incidents = Table(
     Column("triage_json", JSON().with_variant(JSONB, "postgresql"), nullable=False, default={}),
     Column("plan_json", JSON().with_variant(JSONB, "postgresql"), nullable=False, default={}),
     Column("plan_hash", Text, nullable=False, default=""),
+    Column("explanation_json", JSON().with_variant(JSONB, "postgresql"), nullable=False, default={}),
     Column("plan_expires_at", DateTime(timezone=True), nullable=True),
     Column("approver_subject", Text, nullable=False, default=""),
     Column("approval_decision", Text, nullable=False, default=""),
@@ -362,6 +364,7 @@ class IncidentStore:
             "triage_json": {},
             "plan_json": {},
             "plan_hash": "",
+            "explanation_json": {},
             "plan_expires_at": None,
             "approver_subject": "",
             "approval_decision": "",
@@ -402,6 +405,7 @@ class IncidentStore:
         plan_hash: str,
         triage: TriageResult | None = None,
         plan_expires_at: datetime | None = None,
+        explanation: IncidentExplanation | None = None,
     ) -> None:
         state = IncidentState.AWAITING_APPROVAL
         report = ""
@@ -427,6 +431,7 @@ class IncidentStore:
                 "triage_json": triage.model_dump() if triage else {},
                 "plan_json": plan.model_dump(by_alias=True),
                 "plan_hash": plan_hash,
+                "explanation_json": explanation.model_dump(by_alias=True) if explanation else {},
                 "plan_expires_at": plan_expires_at,
                 "state": state.value,
                 "report": report,
@@ -568,6 +573,7 @@ def _incident_from_row(row: Any) -> Incident:
     evidence_json = _load_json(row["evidence_json"], [])
     triage_json = _load_json(row["triage_json"], {})
     plan_json = _load_json(row["plan_json"], {})
+    explanation_json = _load_json(row["explanation_json"], {})
     report_json = _load_json(row["report_json"], {})
     return Incident(
         id=row["id"],
@@ -584,6 +590,7 @@ def _incident_from_row(row: Any) -> Incident:
         triage=TriageResult.model_validate(triage_json) if triage_json else None,
         plan=Plan.model_validate(plan_json) if plan_json else Plan(),
         plan_hash=row["plan_hash"] or "",
+        explanation=IncidentExplanation.model_validate(explanation_json) if explanation_json else IncidentExplanation(),
         plan_expires_at=row["plan_expires_at"],
         approver_subject=row["approver_subject"] or "",
         approval_decision=row["approval_decision"] or "",

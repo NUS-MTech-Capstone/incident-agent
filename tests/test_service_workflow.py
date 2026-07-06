@@ -4,7 +4,16 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from incident_agent.models import AlertStatus, ApprovalOutcome, IncidentEventType, IncidentState, OperationResult, Plan
+from incident_agent.models import (
+    AlertStatus,
+    ApprovalOutcome,
+    Incident,
+    IncidentEventType,
+    IncidentState,
+    OperationResult,
+    Plan,
+)
+from incident_agent.planning.catalog import DIAGNOSTIC_OPERATIONS
 from incident_agent.persistence.store import Conflict, IncidentStore, incidents
 from incident_agent.planning.supervisor import plan_hash
 from tests.conftest import FakeDDM, StaticPlanner, alert, make_service
@@ -30,6 +39,16 @@ async def test_full_workflow_no_action_completes_and_closes(
     assert managed_alert.incident_id == incident.id
     assert incident.plan.actions == []
     assert ddm.started
+    assert "target_probe" in ddm.started[0][2]
+    assert "target_probe" in [item.operation_id for item in incident.evidence]
+    assert incident.explanation.model.planner_type == "rule_based"
+    assert incident.explanation.workflow.catalog_version == "v1"
+    assert incident.explanation.workflow.diagnostic_operations == DIAGNOSTIC_OPERATIONS
+    assert any(
+        decision.operation_id == "target_probe" and decision.chosen_by == "policy"
+        for decision in incident.explanation.tool_decisions
+    )
+    assert "diagnose-token" not in incident.explanation.model_dump_json()
     assert ddm.closed
     metrics = capsys.readouterr().out
     assert "IncidentReceived" in metrics
@@ -90,6 +109,32 @@ async def test_full_workflow_restart_approval_execution(
     metrics = capsys.readouterr().out
     assert "PlanApproved" in metrics
     assert "RemediationExecuted" in metrics
+
+
+@pytest.mark.asyncio
+async def test_execution_scopes_token_to_approved_catalog_operation(store: IncidentStore) -> None:
+    ddm = FakeDDM(
+        {
+            "recover_demo_app": OperationResult(operationId="recover_demo_app", stdout="recovered", exitCode=0),
+            "service_status": OperationResult(operationId="service_status", stdout="active", exitCode=0),
+            "health_check": OperationResult(operationId="health_check", stdout="ok", exitCode=0),
+        }
+    )
+    plan = Plan(
+        summary="Recover demo app",
+        rationale="Service is active but unhealthy",
+        actions=[{"operationId": "recover_demo_app", "reason": "health_check failed"}],
+    )
+    service = make_service(store, ddm, StaticPlanner(plan))
+    await service.handle_alert(alert())
+    incident = store.list()[0]
+
+    service.approve(incident.id, incident.plan_hash, "user-1")
+    await service.execute(incident.id, incident.plan_hash)
+
+    assert ("run-1", "remediate", ["recover_demo_app"], incident.plan_hash) in ddm.tokens
+    assert ("recover_demo_app", incident.plan_hash) in ddm.executed
+    assert store.get(incident.id).post_incident_report.action_taken == "recover_demo_app exit=0"
 
 
 def test_approval_hash_mismatch_is_conflict(store: IncidentStore) -> None:
@@ -214,6 +259,30 @@ async def test_remediation_failure_emits_metric(store: IncidentStore, capsys: py
     assert failed.state == IncidentState.FAILED
     assert failed_alert.status == AlertStatus.FAILED
     assert "RemediationFailed" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_plan_validation_failure_is_timeline_metadata_only(store: IncidentStore) -> None:
+    class InvalidPlanner(StaticPlanner):
+        async def plan(self, incident: Incident, evidence: list[OperationResult]) -> Plan:
+            raise ValueError("unsupported action from model output")
+
+    ddm = FakeDDM()
+    service = make_service(
+        store,
+        ddm,
+        InvalidPlanner(Plan(summary="unused", rationale="unused", actions=[])),
+    )
+
+    with pytest.raises(ValueError):
+        await service.handle_alert(alert())
+
+    incident = store.list()[0]
+    events = store.list_events(incident.id)
+    failed = [event for event in events if event.event_type == IncidentEventType.PLAN_VALIDATION_FAILED]
+    assert failed
+    assert failed[0].metadata == {"errorKind": "ValueError"}
+    assert "unsupported action from model output" not in failed[0].model_dump_json()
 
 
 @pytest.mark.asyncio

@@ -35,12 +35,17 @@ class IncidentEventType(StrEnum):
     AGENT_TRIAGED = "AgentTriaged"
     EVIDENCE_COLLECTED = "EvidenceCollected"
     PLAN_PROPOSED = "PlanProposed"
+    PLAN_VALIDATION_FAILED = "PlanValidationFailed"
     PLAN_EXPIRED = "PlanExpired"
     PLAN_APPROVED = "PlanApproved"
     PLAN_REJECTED = "PlanRejected"
     REMEDIATION_STARTED = "RemediationStarted"
+    AUTOMATION_TOKEN_ISSUED = "AutomationTokenIssued"
+    OPERATION_EXECUTED = "OperationExecuted"
     REMEDIATION_EXECUTED = "RemediationExecuted"
     REMEDIATION_FAILED = "RemediationFailed"
+    VERIFICATION_OPERATION_EXECUTED = "VerificationOperationExecuted"
+    AUTOMATION_RUN_CLOSED = "AutomationRunClosed"
     VERIFICATION_PASSED = "VerificationPassed"
     VERIFICATION_FAILED = "VerificationFailed"
     INCIDENT_RECOVERED = "IncidentRecovered"
@@ -121,6 +126,67 @@ class Run(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ExplanationModel(BaseModel):
+    provider: str = ""
+    planner_type: str = Field(alias="plannerType", default="")
+    model_id: str = Field(alias="modelId", default="")
+    aws_region: str = Field(alias="awsRegion", default="")
+    temperature: float | None = None
+    max_prompt_bytes: int = Field(alias="maxPromptBytes", default=0)
+    prompt_templates: dict[str, str] = Field(alias="promptTemplates", default_factory=dict)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ExplanationWorkflow(BaseModel):
+    graph_version: str = Field(alias="graphVersion", default="v1")
+    catalog_version: str = Field(alias="catalogVersion", default="")
+    diagnostic_operations: list[str] = Field(alias="diagnosticOperations", default_factory=list)
+    verification_operations: list[str] = Field(alias="verificationOperations", default_factory=list)
+    run_id: str = Field(alias="runId", default="")
+    plan_hash: str = Field(alias="planHash", default="")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ExplanationToolDecision(BaseModel):
+    operation_id: str = Field(alias="operationId")
+    phase: str
+    chosen_by: str = Field(alias="chosenBy")
+    reason: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ExplanationGuardrail(BaseModel):
+    name: str
+    passed: bool
+    reason: str = ""
+
+
+class ExplanationResponsibility(BaseModel):
+    model_advisory: bool = Field(alias="modelAdvisory", default=True)
+    human_approval_required: bool = Field(alias="humanApprovalRequired", default=True)
+    execution_owner: str = Field(alias="executionOwner", default="agent-controlplane")
+    token_issuer: str = Field(alias="tokenIssuer", default="sts")
+    terminal_traffic: str = Field(
+        alias="terminalTraffic",
+        default="not handled by incident-agent or agent-controlplane",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class IncidentExplanation(BaseModel):
+    model: ExplanationModel = Field(default_factory=ExplanationModel)
+    workflow: ExplanationWorkflow = Field(default_factory=ExplanationWorkflow)
+    tool_decisions: list[ExplanationToolDecision] = Field(alias="toolDecisions", default_factory=list)
+    guardrails: list[ExplanationGuardrail] = Field(default_factory=list)
+    responsibility: ExplanationResponsibility = Field(default_factory=ExplanationResponsibility)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class Incident(BaseModel):
     id: str
     source_id: str
@@ -136,6 +202,7 @@ class Incident(BaseModel):
     triage: TriageResult | None = None
     plan: Plan = Field(default_factory=Plan)
     plan_hash: str = ""
+    explanation: IncidentExplanation = Field(default_factory=IncidentExplanation)
     plan_expires_at: datetime | None = None
     approver_subject: str = ""
     approval_decision: str = ""
