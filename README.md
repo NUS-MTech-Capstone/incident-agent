@@ -131,8 +131,14 @@ upstream alarm description, then replay messages by redriving them from the DLQ.
 
 Alert rows store sanitized metadata only: source identifiers, managed-server
 source type, alarm ARN/name, CloudWatch state, host ID, reason, status,
-group key, linked incident ID, error summary, and timestamps. Raw SNS/SQS
-payloads are not retained.
+group key, linked incident ID, grouped flag, error summary, and timestamps.
+Raw SNS/SQS payloads are not retained.
+
+The `groupKey` suppresses duplicate active agent runs. A managed-server `ALARM`
+for the same active group links to the existing incident and records an
+`AlertGrouped` timeline event instead of starting another workflow. The alert
+row is still retained for operator visibility. Managed-server `OK` alerts
+recover matching active incidents and record recovery timeline metadata.
 
 Alert statuses:
 
@@ -151,6 +157,7 @@ GET  /readyz
 GET  /openapi.yaml
 GET  /alerts
 GET  /alerts/{alertId}
+GET  /agentic-ai/health
 GET  /incidents
 GET  /incidents/{incidentId}
 POST /incidents/{incidentId}/approve
@@ -161,8 +168,9 @@ The incident list and detail routes preserve their HTML responses for direct
 browser review. When called with `Accept: application/json`, they return safe
 incident summaries/details for the Angular Agentic AI tab. The JSON incident
 detail includes stored triage summary/rationale, proposed plan, evidence,
-approval metadata, and post-incident report/error fields. Approval routes accept
-either HTML form data or JSON:
+approval metadata, plan expiry, append-only timeline, approval decision audit,
+and structured post-incident report/error fields. Approval routes accept either
+HTML form data or JSON:
 
 ```json
 {"planHash":"<exact stored plan hash>"}
@@ -170,7 +178,10 @@ either HTML form data or JSON:
 
 JSON approval and rejection responses return the updated incident detail.
 `/alerts` and `/alerts/{alertId}` return sanitized managed-server alert
-metadata and the linked incident detail when one exists. The JSON surface
+metadata and the linked incident detail when one exists. `/agentic-ai/health`
+returns safe operational status for the Angular Agentic AI page: database
+readiness, queue consumer configured/running flags, last processed alert time,
+last sanitized error summary, and active/failed incident counts. The JSON surface
 intentionally omits raw payloads, automation operation URLs, capability tokens,
 secrets, prompts, and terminal streams.
 
@@ -178,6 +189,12 @@ The incident routes trust Cognito identity headers supplied by the authenticated
 ALB boundary and must not be exposed through an unauthenticated ingress. Any
 authenticated operator may view incidents, but approval and rejection require
 the Cognito user to be in the `Manager` or `Admin` group.
+
+Proposed plans expire 30 minutes after `PlanProposed`. Approve/reject attempts
+after expiry return `409` and are recorded in the approval audit. All approval
+attempts are retained as sanitized metadata, including successful decisions,
+manager/admin authorization failures, stale plan hashes, missing incidents, and
+expired plans.
 
 ## Development
 

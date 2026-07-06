@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
-from incident_agent.models import AlertStatus, IncidentState, OperationResult, Plan
-from incident_agent.persistence.store import Conflict, IncidentStore
+from incident_agent.models import AlertStatus, ApprovalOutcome, IncidentEventType, IncidentState, OperationResult, Plan
+from incident_agent.persistence.store import Conflict, IncidentStore, incidents
 from incident_agent.planning.supervisor import plan_hash
 from tests.conftest import FakeDDM, StaticPlanner, alert, make_service
 
@@ -34,6 +36,14 @@ async def test_full_workflow_no_action_completes_and_closes(
     assert "IncidentTriaged" in metrics
     assert "EvidenceCollected" in metrics
     assert "PlanProposed" in metrics
+    events = store.list_events(incident.id)
+    assert [event.event_type for event in events] == [
+        IncidentEventType.ALERT_RECEIVED,
+        IncidentEventType.INCIDENT_CREATED,
+        IncidentEventType.AGENT_TRIAGED,
+        IncidentEventType.EVIDENCE_COLLECTED,
+        IncidentEventType.PLAN_PROPOSED,
+    ]
 
 
 @pytest.mark.asyncio
@@ -68,6 +78,13 @@ async def test_full_workflow_restart_approval_execution(
     completed_alert = store.list_alerts()[0]
     assert completed.state == IncidentState.COMPLETED
     assert completed_alert.status == AlertStatus.RESOLVED
+    assert completed.post_incident_report.final_state == IncidentState.COMPLETED.value
+    assert completed.post_incident_report.action_taken == "restart_service exit=0"
+    assert [item.outcome for item in store.list_approval_decisions(incident.id)] == [ApprovalOutcome.SUCCEEDED]
+    event_types = [event.event_type for event in store.list_events(incident.id)]
+    assert IncidentEventType.PLAN_APPROVED in event_types
+    assert IncidentEventType.REMEDIATION_STARTED in event_types
+    assert IncidentEventType.VERIFICATION_PASSED in event_types
     assert ("restart_service", incident.plan_hash) in ddm.executed
     assert ddm.closed[-1] == ("run-1", "verify-token")
     metrics = capsys.readouterr().out
@@ -85,6 +102,56 @@ def test_approval_hash_mismatch_is_conflict(store: IncidentStore) -> None:
     store.set_diagnosis(incident.id, "run-1", "http://dataplane", [], plan, plan_hash(plan))
     with pytest.raises(Conflict):
         store.approve(incident.id, "changed", "user-1")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_active_alarm_groups_into_existing_incident(store: IncidentStore) -> None:
+    ddm = FakeDDM()
+    plan = Plan(
+        summary="Restart managed service",
+        rationale="Service health is failed",
+        actions=[{"operationId": "restart_service", "reason": "health_check failed"}],
+    )
+    service = make_service(store, ddm, StaticPlanner(plan))
+
+    await service.handle_alert(alert(source_id="alarm-state-1"))
+    await service.handle_alert(alert(source_id="alarm-state-2"))
+
+    incidents_list = store.list()
+    alerts = store.list_alerts()
+    assert len(incidents_list) == 1
+    assert len(alerts) == 2
+    assert any(item.grouped for item in alerts)
+    assert all(item.incident_id == incidents_list[0].id for item in alerts)
+    assert len(ddm.started) == 1
+    assert IncidentEventType.ALERT_GROUPED in [event.event_type for event in store.list_events(incidents_list[0].id)]
+
+
+@pytest.mark.asyncio
+async def test_expired_plan_decision_is_conflict_and_audited(store: IncidentStore) -> None:
+    ddm = FakeDDM()
+    plan = Plan(
+        summary="Restart managed service",
+        rationale="Service health is failed",
+        actions=[{"operationId": "restart_service", "reason": "health_check failed"}],
+    )
+    service = make_service(store, ddm, StaticPlanner(plan))
+    await service.handle_alert(alert())
+    incident = store.list()[0]
+    with store.engine.begin() as conn:
+        conn.execute(
+            incidents.update()
+            .where(incidents.c.id == incident.id)
+            .values(plan_expires_at=datetime.now(UTC) - timedelta(minutes=1))
+        )
+
+    with pytest.raises(Conflict, match="plan expired"):
+        service.approve(incident.id, incident.plan_hash, "manager-1")
+
+    decisions = store.list_approval_decisions(incident.id)
+    assert decisions[0].outcome == ApprovalOutcome.CONFLICT
+    assert decisions[0].error_reason == "plan expired"
+    assert IncidentEventType.PLAN_EXPIRED in [event.event_type for event in store.list_events(incident.id)]
 
 
 @pytest.mark.asyncio
@@ -166,5 +233,7 @@ async def test_ok_alarm_marks_open_incident_and_alert_resolved(store: IncidentSt
     recovered = store.get(incident.id)
     alerts = store.list_alerts()
     assert recovered.state == IncidentState.RECOVERED
+    assert recovered.post_incident_report.final_state == IncidentState.RECOVERED.value
     assert {item.status for item in alerts} == {AlertStatus.RESOLVED}
     assert any(item.incident_id == incident.id for item in alerts)
+    assert IncidentEventType.INCIDENT_RECOVERED in [event.event_type for event in store.list_events(incident.id)]

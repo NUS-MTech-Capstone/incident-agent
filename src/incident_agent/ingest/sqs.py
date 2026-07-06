@@ -34,6 +34,7 @@ class SQSConsumer:
             if not self.queue_url:
                 logger.info("SQS consumer disabled because INCIDENT_QUEUE_URL is empty")
                 return
+            self.service.set_consumer_running(True)
             while not self._stopped.is_set():
                 response = await asyncio.to_thread(
                     self.client.receive_message,
@@ -61,8 +62,12 @@ class SQSConsumer:
                             )
                         except Exception as exc:  # noqa: BLE001 - SQS redelivery/DLQ handles retry budget
                             emit_metric("SQSMessageFailures", 1, errorKind=type(exc).__name__)
+                            self.service.record_processing_error(
+                                f"incident alert processing failed: {type(exc).__name__}"
+                            )
                             log_exception(logger, "incident alert processing failed", errorKind=type(exc).__name__)
         finally:
+            self.service.set_consumer_running(False)
             self._finished.set()
 
     def stop(self) -> None:

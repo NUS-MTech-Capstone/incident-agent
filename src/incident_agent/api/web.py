@@ -11,7 +11,15 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from incident_agent.models import Incident, IncidentState, ManagedAlert
+from incident_agent.models import (
+    AgentHealth,
+    ApprovalDecisionAudit,
+    Incident,
+    IncidentEvent,
+    IncidentState,
+    ManagedAlert,
+    PostIncidentReport,
+)
 from incident_agent.observability import REQUEST_ID_HEADER, new_request_id, use_request_id
 from incident_agent.persistence.store import Conflict, NotFound
 from incident_agent.service import IncidentService
@@ -53,6 +61,11 @@ def create_app(service: IncidentService) -> FastAPI:
         path = Path(__file__).resolve().parents[3] / "api" / "openapi.yaml"
         return Response(path.read_text(encoding="utf-8"), media_type="application/yaml; charset=utf-8")
 
+    @app.get("/agentic-ai/health")
+    async def agentic_ai_health(x_amzn_oidc_data: str | None = Header(default=None)) -> JSONResponse:
+        _user_from_header(x_amzn_oidc_data)
+        return _json(_health(service.health()))
+
     @app.get("/alerts")
     async def list_alerts(x_amzn_oidc_data: str | None = Header(default=None)) -> JSONResponse:
         _user_from_header(x_amzn_oidc_data)
@@ -71,7 +84,7 @@ def create_app(service: IncidentService) -> FastAPI:
                 incident = service.get(alert.incident_id)
             except NotFound:
                 incident = None
-        return _json(_alert_detail(alert, incident))
+        return _json(_alert_detail(alert, incident, service.timeline(incident.id) if incident else []))
 
     @app.get("/incidents")
     async def list_incidents(
@@ -112,7 +125,13 @@ def create_app(service: IncidentService) -> FastAPI:
         except NotFound as exc:
             raise HTTPException(status_code=404, detail="incident not found") from exc
         if _wants_json(request):
-            return _json(_incident_detail(incident))
+            return _json(
+                _incident_detail(
+                    incident,
+                    service.timeline(incident.id),
+                    service.approval_decisions(incident.id),
+                )
+            )
         actions = "".join(
             f"<p><code>{_h(action.operation_id)}</code>: {_h(action.reason)}</p>" for action in incident.plan.actions
         )
@@ -156,15 +175,32 @@ def create_app(service: IncidentService) -> FastAPI:
         x_amzn_oidc_data: str | None = Header(default=None),
     ) -> Response:
         user = _user_from_header(x_amzn_oidc_data)
-        _require_decision_authority(user)
         _same_origin(request)
         plan_hash = await _plan_hash_from_request(request)
+        if not _can_decide(user):
+            service.record_denied_decision(
+                incident_id,
+                "APPROVE",
+                plan_hash,
+                user["sub"],
+                "manager approval is required",
+            )
+            raise HTTPException(status_code=403, detail="manager approval is required")
         try:
             service.approve(incident_id, plan_hash, user["sub"])
+        except NotFound as exc:
+            raise HTTPException(status_code=404, detail="incident not found") from exc
         except Conflict as exc:
-            raise HTTPException(status_code=409, detail="incident changed; reload before deciding") from exc
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if _wants_json(request):
-            return _json(_incident_detail(service.get(incident_id)))
+            updated = service.get(incident_id)
+            return _json(
+                _incident_detail(
+                    updated,
+                    service.timeline(incident_id),
+                    service.approval_decisions(incident_id),
+                )
+            )
         return RedirectResponse(f"/incidents/{quote(incident_id)}", status_code=303)
 
     @app.post("/incidents/{incident_id}/reject")
@@ -174,15 +210,32 @@ def create_app(service: IncidentService) -> FastAPI:
         x_amzn_oidc_data: str | None = Header(default=None),
     ) -> Response:
         user = _user_from_header(x_amzn_oidc_data)
-        _require_decision_authority(user)
         _same_origin(request)
         plan_hash = await _plan_hash_from_request(request)
+        if not _can_decide(user):
+            service.record_denied_decision(
+                incident_id,
+                "REJECT",
+                plan_hash,
+                user["sub"],
+                "manager approval is required",
+            )
+            raise HTTPException(status_code=403, detail="manager approval is required")
         try:
             service.reject(incident_id, plan_hash, user["sub"])
+        except NotFound as exc:
+            raise HTTPException(status_code=404, detail="incident not found") from exc
         except Conflict as exc:
-            raise HTTPException(status_code=409, detail="incident changed; reload before deciding") from exc
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if _wants_json(request):
-            return _json(_incident_detail(service.get(incident_id)))
+            updated = service.get(incident_id)
+            return _json(
+                _incident_detail(
+                    updated,
+                    service.timeline(incident_id),
+                    service.approval_decisions(incident_id),
+                )
+            )
         return RedirectResponse(f"/incidents/{quote(incident_id)}", status_code=303)
 
     return app
@@ -270,7 +323,11 @@ def _incident_summary(incident: Incident) -> dict[str, Any]:
     }
 
 
-def _incident_detail(incident: Incident) -> dict[str, Any]:
+def _incident_detail(
+    incident: Incident,
+    timeline: list[IncidentEvent] | None = None,
+    approval_decisions: list[ApprovalDecisionAudit] | None = None,
+) -> dict[str, Any]:
     detail = _incident_summary(incident)
     detail.update(
         {
@@ -279,11 +336,16 @@ def _incident_detail(incident: Incident) -> dict[str, Any]:
             "evidence": [item.model_dump(by_alias=True) for item in incident.evidence],
             "triage": incident.triage.model_dump() if incident.triage else None,
             "plan": incident.plan.model_dump(by_alias=True),
+            "planExpiresAt": incident.plan_expires_at,
+            "isPlanExpired": _is_plan_expired(incident),
             "approverSubject": incident.approver_subject,
             "report": incident.report,
             "errorMessage": incident.error_message,
             "postIncidentStatus": _post_incident_status(incident),
             "postIncidentSummary": incident.report or incident.error_message,
+            "postIncidentReport": _post_incident_report(incident.post_incident_report),
+            "timeline": [_event(item) for item in timeline or []],
+            "approvalDecisions": [_approval_decision(item) for item in approval_decisions or []],
         }
     )
     return detail
@@ -302,6 +364,7 @@ def _alert_summary(alert: ManagedAlert) -> dict[str, Any]:
         "status": alert.status.value,
         "groupKey": alert.group_key,
         "incidentId": alert.incident_id,
+        "grouped": alert.grouped,
         "errorSummary": alert.error_summary,
         "occurredAt": alert.occurred_at,
         "createdAt": alert.created_at,
@@ -309,10 +372,60 @@ def _alert_summary(alert: ManagedAlert) -> dict[str, Any]:
     }
 
 
-def _alert_detail(alert: ManagedAlert, incident: Incident | None) -> dict[str, Any]:
+def _alert_detail(alert: ManagedAlert, incident: Incident | None, timeline: list[IncidentEvent]) -> dict[str, Any]:
     detail = _alert_summary(alert)
-    detail["incident"] = _incident_detail(incident) if incident else None
+    detail["incident"] = _incident_detail(incident, timeline, []) if incident else None
     return detail
+
+
+def _event(event: IncidentEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "incidentId": event.incident_id,
+        "alertId": event.alert_id,
+        "eventType": event.event_type.value,
+        "actor": event.actor,
+        "message": event.message,
+        "metadata": event.metadata,
+        "createdAt": event.created_at,
+    }
+
+
+def _approval_decision(decision: ApprovalDecisionAudit) -> dict[str, Any]:
+    return {
+        "id": decision.id,
+        "incidentId": decision.incident_id,
+        "actor": decision.actor,
+        "decision": decision.decision,
+        "submittedPlanHash": decision.submitted_plan_hash,
+        "outcome": decision.outcome.value,
+        "errorReason": decision.error_reason,
+        "createdAt": decision.created_at,
+    }
+
+
+def _post_incident_report(report: PostIncidentReport) -> dict[str, Any]:
+    return {
+        "rootCauseSummary": report.root_cause_summary,
+        "actionTaken": report.action_taken,
+        "verificationSummary": report.verification_summary,
+        "finalState": report.final_state,
+        "startedAt": report.started_at,
+        "resolvedAt": report.resolved_at,
+        "durationSeconds": report.duration_seconds,
+    }
+
+
+def _health(health: AgentHealth) -> dict[str, Any]:
+    return {
+        "databaseReady": health.database_ready,
+        "queueConsumerConfigured": health.queue_consumer_configured,
+        "queueConsumerRunning": health.queue_consumer_running,
+        "lastAlertProcessedAt": health.last_alert_processed_at,
+        "lastErrorSummary": health.last_error_summary,
+        "activeIncidentCount": health.active_incident_count,
+        "failedIncidentCount": health.failed_incident_count,
+    }
 
 
 def _post_incident_status(incident: Incident) -> str:
@@ -324,6 +437,17 @@ def _post_incident_status(incident: Incident) -> str:
     }:
         return incident.state.value
     return ""
+
+
+def _is_plan_expired(incident: Incident) -> bool:
+    from datetime import UTC, datetime
+
+    if not incident.plan_expires_at:
+        return False
+    expires_at = incident.plan_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at <= datetime.now(UTC)
 
 
 def _same_origin(request: Request) -> None:

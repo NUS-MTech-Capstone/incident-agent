@@ -29,9 +29,17 @@ class FakeSQS:
 class RecordingService:
     def __init__(self) -> None:
         self.alerts = []
+        self.consumer_running = False
+        self.errors: list[str] = []
 
     async def handle_alert(self, item: object) -> None:
         self.alerts.append(item)
+
+    def set_consumer_running(self, running: bool) -> None:
+        self.consumer_running = running
+
+    def record_processing_error(self, summary: str) -> None:
+        self.errors.append(summary)
 
 
 @pytest.mark.asyncio

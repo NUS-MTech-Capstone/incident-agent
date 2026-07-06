@@ -70,6 +70,20 @@ paths:
           description: Missing or invalid Cognito identity.
         "404":
           description: Alert not found.
+  /agentic-ai/health:
+    get:
+      summary: Show safe Agentic AI operational health
+      security:
+        - albCognito: []
+      responses:
+        "200":
+          description: Safe incident-agent health and queue status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentHealth"
+        "401":
+          description: Missing or invalid Cognito identity.
   /incidents:
     get:
       summary: List incidents
@@ -156,7 +170,7 @@ paths:
         "403":
           description: Cross-site decision rejected or user is not in Manager/Admin.
         "409":
-          description: Incident changed; reload before deciding.
+          description: Incident changed or the plan expired; reload before deciding.
   /incidents/{incidentId}/reject:
     post:
       summary: Reject the exact proposed incident plan
@@ -187,7 +201,7 @@ paths:
         "403":
           description: Cross-site decision rejected or user is not in Manager/Admin.
         "409":
-          description: Incident changed; reload before deciding.
+          description: Incident changed or the plan expired; reload before deciding.
 components:
   securitySchemes:
     albCognito:
@@ -257,7 +271,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/IncidentSummary"
         - type: object
-          required: [sourceId, alarmArn, evidence, triage, plan, approverSubject, report, errorMessage, postIncidentStatus, postIncidentSummary]
+          required: [sourceId, alarmArn, evidence, triage, plan, isPlanExpired, approverSubject, report, errorMessage, postIncidentStatus, postIncidentSummary, postIncidentReport, timeline, approvalDecisions]
           properties:
             sourceId:
               type: string
@@ -273,6 +287,12 @@ components:
                 - type: "null"
             plan:
               $ref: "#/components/schemas/Plan"
+            planExpiresAt:
+              type: string
+              format: date-time
+              nullable: true
+            isPlanExpired:
+              type: boolean
             approverSubject:
               type: string
             report:
@@ -283,9 +303,19 @@ components:
               type: string
             postIncidentSummary:
               type: string
+            postIncidentReport:
+              $ref: "#/components/schemas/PostIncidentReport"
+            timeline:
+              type: array
+              items:
+                $ref: "#/components/schemas/IncidentEvent"
+            approvalDecisions:
+              type: array
+              items:
+                $ref: "#/components/schemas/ApprovalDecisionAudit"
     ManagedAlert:
       type: object
-      required: [id, sourceId, sourceType, alarmArn, alarmName, cloudwatchState, hostId, reason, status, groupKey, incidentId, errorSummary, occurredAt, createdAt, updatedAt]
+      required: [id, sourceId, sourceType, alarmArn, alarmName, cloudwatchState, hostId, reason, status, groupKey, incidentId, grouped, errorSummary, occurredAt, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -312,6 +342,8 @@ components:
           type: string
         incidentId:
           type: string
+        grouped:
+          type: boolean
         errorSummary:
           type: string
         occurredAt:
@@ -377,4 +409,92 @@ components:
         stderr:
           type: string
         exitCode:
+          type: integer
+    IncidentEvent:
+      type: object
+      required: [id, incidentId, alertId, eventType, actor, message, metadata, createdAt]
+      properties:
+        id:
+          type: string
+        incidentId:
+          type: string
+        alertId:
+          type: string
+        eventType:
+          type: string
+          enum: [AlertReceived, AlertGrouped, IncidentCreated, AgentTriaged, EvidenceCollected, PlanProposed, PlanExpired, PlanApproved, PlanRejected, RemediationStarted, RemediationExecuted, RemediationFailed, VerificationPassed, VerificationFailed, IncidentRecovered]
+        actor:
+          type: string
+        message:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+    ApprovalDecisionAudit:
+      type: object
+      required: [id, incidentId, actor, decision, submittedPlanHash, outcome, errorReason, createdAt]
+      properties:
+        id:
+          type: string
+        incidentId:
+          type: string
+        actor:
+          type: string
+        decision:
+          type: string
+        submittedPlanHash:
+          type: string
+        outcome:
+          type: string
+          enum: [SUCCEEDED, DENIED, CONFLICT, NOT_FOUND]
+        errorReason:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    PostIncidentReport:
+      type: object
+      required: [rootCauseSummary, actionTaken, verificationSummary, finalState]
+      properties:
+        rootCauseSummary:
+          type: string
+        actionTaken:
+          type: string
+        verificationSummary:
+          type: string
+        finalState:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        resolvedAt:
+          type: string
+          format: date-time
+          nullable: true
+        durationSeconds:
+          type: number
+          nullable: true
+    AgentHealth:
+      type: object
+      required: [databaseReady, queueConsumerConfigured, queueConsumerRunning, lastErrorSummary, activeIncidentCount, failedIncidentCount]
+      properties:
+        databaseReady:
+          type: boolean
+        queueConsumerConfigured:
+          type: boolean
+        queueConsumerRunning:
+          type: boolean
+        lastAlertProcessedAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastErrorSummary:
+          type: string
+        activeIncidentCount:
+          type: integer
+        failedIncidentCount:
           type: integer

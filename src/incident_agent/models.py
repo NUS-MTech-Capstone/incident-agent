@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -26,6 +26,31 @@ class AlertStatus(StrEnum):
     RESOLVED = "RESOLVED"
     REJECTED = "REJECTED"
     FAILED = "FAILED"
+
+
+class IncidentEventType(StrEnum):
+    ALERT_RECEIVED = "AlertReceived"
+    ALERT_GROUPED = "AlertGrouped"
+    INCIDENT_CREATED = "IncidentCreated"
+    AGENT_TRIAGED = "AgentTriaged"
+    EVIDENCE_COLLECTED = "EvidenceCollected"
+    PLAN_PROPOSED = "PlanProposed"
+    PLAN_EXPIRED = "PlanExpired"
+    PLAN_APPROVED = "PlanApproved"
+    PLAN_REJECTED = "PlanRejected"
+    REMEDIATION_STARTED = "RemediationStarted"
+    REMEDIATION_EXECUTED = "RemediationExecuted"
+    REMEDIATION_FAILED = "RemediationFailed"
+    VERIFICATION_PASSED = "VerificationPassed"
+    VERIFICATION_FAILED = "VerificationFailed"
+    INCIDENT_RECOVERED = "IncidentRecovered"
+
+
+class ApprovalOutcome(StrEnum):
+    SUCCEEDED = "SUCCEEDED"
+    DENIED = "DENIED"
+    CONFLICT = "CONFLICT"
+    NOT_FOUND = "NOT_FOUND"
 
 
 class Priority(StrEnum):
@@ -111,10 +136,12 @@ class Incident(BaseModel):
     triage: TriageResult | None = None
     plan: Plan = Field(default_factory=Plan)
     plan_hash: str = ""
+    plan_expires_at: datetime | None = None
     approver_subject: str = ""
     approval_decision: str = ""
     approval_at: datetime | None = None
     report: str = ""
+    post_incident_report: PostIncidentReport = Field(default_factory=lambda: PostIncidentReport())
     error_message: str = ""
     created_at: datetime
     updated_at: datetime
@@ -132,10 +159,53 @@ class ManagedAlert(BaseModel):
     status: AlertStatus
     group_key: str
     incident_id: str = ""
+    grouped: bool = False
     error_summary: str = ""
     occurred_at: datetime
     created_at: datetime
     updated_at: datetime
+
+
+class PostIncidentReport(BaseModel):
+    root_cause_summary: str = ""
+    action_taken: str = ""
+    verification_summary: str = ""
+    final_state: str = ""
+    started_at: datetime | None = None
+    resolved_at: datetime | None = None
+    duration_seconds: float | None = None
+
+
+class IncidentEvent(BaseModel):
+    id: str
+    incident_id: str
+    alert_id: str = ""
+    event_type: IncidentEventType
+    actor: str = ""
+    message: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class ApprovalDecisionAudit(BaseModel):
+    id: str
+    incident_id: str
+    actor: str
+    decision: str
+    submitted_plan_hash: str
+    outcome: ApprovalOutcome
+    error_reason: str = ""
+    created_at: datetime
+
+
+class AgentHealth(BaseModel):
+    database_ready: bool
+    queue_consumer_configured: bool
+    queue_consumer_running: bool
+    last_alert_processed_at: datetime | None = None
+    last_error_summary: str = ""
+    active_incident_count: int
+    failed_incident_count: int
 
 
 class ApprovalDecision(BaseModel):

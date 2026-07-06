@@ -54,6 +54,7 @@ def create_runtime_app() -> FastAPI:
     configure_logging(settings.log_format)
     service = build_service()
     app = create_app(service)
+    service.set_consumer_configured(bool(settings.enable_sqs_consumer and settings.incident_queue_url))
     if settings.enable_sqs_consumer:
         consumer = SQSConsumer(
             settings.incident_queue_url,
