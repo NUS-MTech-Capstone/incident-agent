@@ -11,9 +11,9 @@ the model and behind explicit validation plus human approval.
 The service consumes managed-server CloudWatch alarm notifications from SQS,
 gathers bounded diagnostics through the existing DenDenMushi automation path,
 asks Bedrock through LangChain for structured triage and plan output, stores
-sanitized alert and incident metadata in Postgres, and exposes
-Cognito-protected approval pages plus JSON endpoints for the Angular Agentic AI
-UI.
+sanitized alert and incident metadata in Postgres. The Go
+`agent-controlplane` exposes Cognito-protected approval pages plus JSON
+endpoints for the Angular Agentic AI UI.
 
 The model never receives authority to execute free-form shell commands. The
 only mutating v1 operation is `restart_service`, and it runs only after a human
@@ -32,6 +32,7 @@ CLOUDWATCH_NAMESPACE=DenDenMushi
 INCIDENT_QUEUE_URL=
 DATABASE_URL=
 DATABASE_SECRET_ID=
+AGENT_CONTROLPLANE_URL=http://agent-controlplane:8092
 PROXY_CONTROLPLANE_URL=http://proxy-controlplane:8080
 WORKLOAD_TOKEN_FILE=/var/run/secrets/tokens/incident-agent-token
 BEDROCK_MODEL_ID=global.amazon.nova-2-lite-v1:0
@@ -149,46 +150,36 @@ RECEIVED -> TRIAGING -> FAILED
 PENDING_APPROVAL -> REJECTED
 ```
 
+`AGENT_CONTROLPLANE_URL` is used for bounded automation run start/token/close
+calls. `PROXY_CONTROLPLANE_URL` remains as a temporary local fallback during
+the extraction rollout.
+
 ## Routes
 
 ```http
 GET  /healthz
 GET  /readyz
 GET  /openapi.yaml
+GET  /internal/worker/health
+```
+
+Public Agentic AI routes now live in `agent-controlplane`:
+
+```http
+GET  /agentic-ai/health
 GET  /alerts
 GET  /alerts/{alertId}
-GET  /agentic-ai/health
 GET  /incidents
 GET  /incidents/{incidentId}
 POST /incidents/{incidentId}/approve
 POST /incidents/{incidentId}/reject
 ```
 
-The incident list and detail routes preserve their HTML responses for direct
-browser review. When called with `Accept: application/json`, they return safe
-incident summaries/details for the Angular Agentic AI tab. The JSON incident
-detail includes stored triage summary/rationale, proposed plan, evidence,
-approval metadata, plan expiry, append-only timeline, approval decision audit,
-and structured post-incident report/error fields. Approval routes accept either
-HTML form data or JSON:
-
-```json
-{"planHash":"<exact stored plan hash>"}
-```
-
-JSON approval and rejection responses return the updated incident detail.
-`/alerts` and `/alerts/{alertId}` return sanitized managed-server alert
-metadata and the linked incident detail when one exists. `/agentic-ai/health`
-returns safe operational status for the Angular Agentic AI page: database
-readiness, queue consumer configured/running flags, last processed alert time,
-last sanitized error summary, and active/failed incident counts. The JSON surface
+`/internal/worker/health` returns safe worker status for agent-controlplane:
+database readiness, queue consumer configured/running flags, last processed
+alert time, last sanitized error summary, and active/failed incident counts. It
 intentionally omits raw payloads, automation operation URLs, capability tokens,
 secrets, prompts, and terminal streams.
-
-The incident routes trust Cognito identity headers supplied by the authenticated
-ALB boundary and must not be exposed through an unauthenticated ingress. Any
-authenticated operator may view incidents, but approval and rejection require
-the Cognito user to be in the `Manager` or `Admin` group.
 
 Proposed plans expire 30 minutes after `PlanProposed`. Approve/reject attempts
 after expiry return `409` and are recorded in the approval audit. All approval

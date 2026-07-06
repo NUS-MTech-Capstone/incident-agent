@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
-  title: DenDenMushi Incident Agent API
+  title: DenDenMushi Incident Agent Worker API
   version: 0.1.0
-  description: Incident review endpoints. Incident pages are available as HTML, and the same routes return JSON for the Angular Agentic AI UI when requested with Accept application/json.
+  description: Internal worker health endpoints for SQS and Bedrock incident triage. Public Agentic AI APIs are served by agent-controlplane.
 servers:
   - url: http://localhost:8091
 paths:
@@ -28,193 +28,23 @@ paths:
                 $ref: "#/components/schemas/ReadyResponse"
         "503":
           description: Service dependency check failed.
-  /alerts:
+  /internal/worker/health:
     get:
-      summary: List managed-server alerts
-      security:
-        - albCognito: []
+      summary: Internal worker health and queue status
       responses:
         "200":
-          description: Sanitized managed-server alert metadata.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [alerts]
-                properties:
-                  alerts:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/ManagedAlert"
-        "401":
-          description: Missing or invalid Cognito identity.
-  /alerts/{alertId}:
-    get:
-      summary: Show managed-server alert detail
-      security:
-        - albCognito: []
-      parameters:
-        - name: alertId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Sanitized alert detail and linked incident when available.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ManagedAlertDetail"
-        "401":
-          description: Missing or invalid Cognito identity.
-        "404":
-          description: Alert not found.
-  /agentic-ai/health:
-    get:
-      summary: Show safe Agentic AI operational health
-      security:
-        - albCognito: []
-      responses:
-        "200":
-          description: Safe incident-agent health and queue status.
+          description: Safe worker health metadata for agent-controlplane.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/AgentHealth"
-        "401":
-          description: Missing or invalid Cognito identity.
-  /incidents:
+  /openapi.yaml:
     get:
-      summary: List incidents
-      security:
-        - albCognito: []
+      summary: OpenAPI specification
       responses:
         "200":
-          description: HTML incident list or JSON incident summaries.
-          content:
-            text/html:
-              schema:
-                type: string
-            application/json:
-              schema:
-                type: object
-                required: [incidents]
-                properties:
-                  incidents:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/IncidentSummary"
-        "401":
-          description: Missing or invalid Cognito identity.
-          content:
-            text/plain:
-              schema:
-                type: string
-  /incidents/{incidentId}:
-    get:
-      summary: Show incident detail
-      security:
-        - albCognito: []
-      parameters:
-        - $ref: "#/components/parameters/IncidentId"
-      responses:
-        "200":
-          description: HTML incident detail or JSON incident detail.
-          content:
-            text/html:
-              schema:
-                type: string
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IncidentDetail"
-        "401":
-          description: Missing or invalid Cognito identity.
-          content:
-            text/plain:
-              schema:
-                type: string
-        "404":
-          description: Incident not found.
-          content:
-            text/plain:
-              schema:
-                type: string
-  /incidents/{incidentId}/approve:
-    post:
-      summary: Approve the exact proposed incident plan
-      security:
-        - albCognito: []
-      parameters:
-        - $ref: "#/components/parameters/IncidentId"
-      requestBody:
-        required: true
-        content:
-          application/x-www-form-urlencoded:
-            schema:
-              $ref: "#/components/schemas/DecisionForm"
-          application/json:
-            schema:
-              $ref: "#/components/schemas/DecisionForm"
-      responses:
-        "200":
-          description: JSON updated incident detail when requested by the Angular UI.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IncidentDetail"
-        "303":
-          description: HTML form submissions redirect to the incident detail page.
-        "400":
-          description: Identity or plan hash missing.
-        "403":
-          description: Cross-site decision rejected or user is not in Manager/Admin.
-        "409":
-          description: Incident changed or the plan expired; reload before deciding.
-  /incidents/{incidentId}/reject:
-    post:
-      summary: Reject the exact proposed incident plan
-      security:
-        - albCognito: []
-      parameters:
-        - $ref: "#/components/parameters/IncidentId"
-      requestBody:
-        required: true
-        content:
-          application/x-www-form-urlencoded:
-            schema:
-              $ref: "#/components/schemas/DecisionForm"
-          application/json:
-            schema:
-              $ref: "#/components/schemas/DecisionForm"
-      responses:
-        "200":
-          description: JSON updated incident detail when requested by the Angular UI.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/IncidentDetail"
-        "303":
-          description: HTML form submissions redirect to the incident detail page.
-        "400":
-          description: Identity or plan hash missing.
-        "403":
-          description: Cross-site decision rejected or user is not in Manager/Admin.
-        "409":
-          description: Incident changed or the plan expired; reload before deciding.
+          description: YAML OpenAPI document.
 components:
-  securitySchemes:
-    albCognito:
-      type: apiKey
-      in: header
-      name: x-amzn-oidc-data
-  parameters:
-    IncidentId:
-      name: incidentId
-      in: path
-      required: true
-      schema:
-        type: string
   schemas:
     HealthResponse:
       type: object
@@ -230,257 +60,14 @@ components:
         status:
           type: string
           example: ready
-    DecisionForm:
-      type: object
-      required: [planHash]
-      properties:
-        planHash:
-          type: string
-    IncidentSummary:
-      type: object
-      required: [id, alarmName, hostId, state, reason, runbookVersion, planHash, approvalDecision, createdAt, updatedAt]
-      properties:
-        id:
-          type: string
-        alarmName:
-          type: string
-        hostId:
-          type: string
-        state:
-          type: string
-          enum: [DIAGNOSING, AWAITING_APPROVAL, EXECUTING, COMPLETED, REJECTED, RECOVERED, FAILED]
-        reason:
-          type: string
-        runbookVersion:
-          type: string
-        planHash:
-          type: string
-        approvalDecision:
-          type: string
-        approvalAt:
-          type: string
-          format: date-time
-          nullable: true
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-    IncidentDetail:
-      allOf:
-        - $ref: "#/components/schemas/IncidentSummary"
-        - type: object
-          required: [sourceId, alarmArn, evidence, triage, plan, isPlanExpired, approverSubject, report, errorMessage, postIncidentStatus, postIncidentSummary, postIncidentReport, timeline, approvalDecisions]
-          properties:
-            sourceId:
-              type: string
-            alarmArn:
-              type: string
-            evidence:
-              type: array
-              items:
-                $ref: "#/components/schemas/OperationResult"
-            triage:
-              anyOf:
-                - $ref: "#/components/schemas/Triage"
-                - type: "null"
-            plan:
-              $ref: "#/components/schemas/Plan"
-            planExpiresAt:
-              type: string
-              format: date-time
-              nullable: true
-            isPlanExpired:
-              type: boolean
-            approverSubject:
-              type: string
-            report:
-              type: string
-            errorMessage:
-              type: string
-            postIncidentStatus:
-              type: string
-            postIncidentSummary:
-              type: string
-            postIncidentReport:
-              $ref: "#/components/schemas/PostIncidentReport"
-            timeline:
-              type: array
-              items:
-                $ref: "#/components/schemas/IncidentEvent"
-            approvalDecisions:
-              type: array
-              items:
-                $ref: "#/components/schemas/ApprovalDecisionAudit"
-    ManagedAlert:
-      type: object
-      required: [id, sourceId, sourceType, alarmArn, alarmName, cloudwatchState, hostId, reason, status, groupKey, incidentId, grouped, errorSummary, occurredAt, createdAt, updatedAt]
-      properties:
-        id:
-          type: string
-        sourceId:
-          type: string
-        sourceType:
-          type: string
-          enum: [managed-server]
-        alarmArn:
-          type: string
-        alarmName:
-          type: string
-        cloudwatchState:
-          type: string
-          enum: [ALARM, OK]
-        hostId:
-          type: string
-        reason:
-          type: string
-        status:
-          type: string
-          enum: [RECEIVED, TRIAGING, TRIAGED, PENDING_APPROVAL, EXECUTING, RESOLVED, REJECTED, FAILED]
-        groupKey:
-          type: string
-        incidentId:
-          type: string
-        grouped:
-          type: boolean
-        errorSummary:
-          type: string
-        occurredAt:
-          type: string
-          format: date-time
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-    ManagedAlertDetail:
-      allOf:
-        - $ref: "#/components/schemas/ManagedAlert"
-        - type: object
-          required: [incident]
-          properties:
-            incident:
-              anyOf:
-                - $ref: "#/components/schemas/IncidentDetail"
-                - type: "null"
-    Triage:
-      type: object
-      required: [priority, category, summary, rationale]
-      properties:
-        priority:
-          type: string
-          enum: [low, medium, high, critical]
-        category:
-          type: string
-        summary:
-          type: string
-        rationale:
-          type: string
-    Plan:
-      type: object
-      required: [summary, rationale, actions]
-      properties:
-        summary:
-          type: string
-        rationale:
-          type: string
-        actions:
-          type: array
-          items:
-            $ref: "#/components/schemas/PlanAction"
-    PlanAction:
-      type: object
-      required: [operationId, reason]
-      properties:
-        operationId:
-          type: string
-        reason:
-          type: string
-    OperationResult:
-      type: object
-      required: [operationId, stdout, stderr, exitCode]
-      properties:
-        operationId:
-          type: string
-        stdout:
-          type: string
-        stderr:
-          type: string
-        exitCode:
-          type: integer
-    IncidentEvent:
-      type: object
-      required: [id, incidentId, alertId, eventType, actor, message, metadata, createdAt]
-      properties:
-        id:
-          type: string
-        incidentId:
-          type: string
-        alertId:
-          type: string
-        eventType:
-          type: string
-          enum: [AlertReceived, AlertGrouped, IncidentCreated, AgentTriaged, EvidenceCollected, PlanProposed, PlanExpired, PlanApproved, PlanRejected, RemediationStarted, RemediationExecuted, RemediationFailed, VerificationPassed, VerificationFailed, IncidentRecovered]
-        actor:
-          type: string
-        message:
-          type: string
-        metadata:
-          type: object
-          additionalProperties: true
-        createdAt:
-          type: string
-          format: date-time
-    ApprovalDecisionAudit:
-      type: object
-      required: [id, incidentId, actor, decision, submittedPlanHash, outcome, errorReason, createdAt]
-      properties:
-        id:
-          type: string
-        incidentId:
-          type: string
-        actor:
-          type: string
-        decision:
-          type: string
-        submittedPlanHash:
-          type: string
-        outcome:
-          type: string
-          enum: [SUCCEEDED, DENIED, CONFLICT, NOT_FOUND]
-        errorReason:
-          type: string
-        createdAt:
-          type: string
-          format: date-time
-    PostIncidentReport:
-      type: object
-      required: [rootCauseSummary, actionTaken, verificationSummary, finalState]
-      properties:
-        rootCauseSummary:
-          type: string
-        actionTaken:
-          type: string
-        verificationSummary:
-          type: string
-        finalState:
-          type: string
-        startedAt:
-          type: string
-          format: date-time
-          nullable: true
-        resolvedAt:
-          type: string
-          format: date-time
-          nullable: true
-        durationSeconds:
-          type: number
-          nullable: true
     AgentHealth:
       type: object
-      required: [databaseReady, queueConsumerConfigured, queueConsumerRunning, lastErrorSummary, activeIncidentCount, failedIncidentCount]
+      required:
+        - databaseReady
+        - queueConsumerConfigured
+        - queueConsumerRunning
+        - activeIncidentCount
+        - failedIncidentCount
       properties:
         databaseReady:
           type: boolean
@@ -498,3 +85,4 @@ components:
           type: integer
         failedIncidentCount:
           type: integer
+

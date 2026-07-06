@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     incident_queue_url: str = Field(default="", alias="INCIDENT_QUEUE_URL")
     database_url: str = Field(default="", alias="DATABASE_URL")
     database_secret_id: str = Field(default="", alias="DATABASE_SECRET_ID")
+    agent_controlplane_url: str = Field(default="", alias="AGENT_CONTROLPLANE_URL")
     proxy_controlplane_url: str = Field(default="http://localhost:8080", alias="PROXY_CONTROLPLANE_URL")
     workload_token_file: str = Field(
         default="/var/run/secrets/tokens/incident-agent-token",

@@ -1,179 +1,46 @@
 from __future__ import annotations
 
-import base64
-import json
-from datetime import UTC, datetime, timedelta
-
 from fastapi.testclient import TestClient
 
 from incident_agent.api.web import create_app
-from incident_agent.models import AlertStatus, ApprovalOutcome, IncidentState, Plan
+from incident_agent.models import Plan
 from incident_agent.persistence.store import IncidentStore
-from incident_agent.planning.supervisor import plan_hash
-from tests.conftest import FakeDDM, StaticPlanner, alert, make_service
+from tests.conftest import FakeDDM, StaticPlanner, make_service
 
 
-def _oidc(groups: list[str] | None = None) -> str:
-    payload = base64.urlsafe_b64encode(
-        json.dumps({"sub": "user-1", "email": "u@example.com", "cognito:groups": groups or ["Manager"]}).encode()
-    ).decode()
-    return f"header.{payload.rstrip('=')}.sig"
-
-
-def _client_with_incident(store: IncidentStore) -> tuple[TestClient, str, str]:
-    ddm = FakeDDM()
-    service = make_service(store, ddm, StaticPlanner(Plan(summary="No action", rationale="none", actions=[])))
-    incident = store.create(alert())
-    plan = Plan(
-        summary="Restart",
-        rationale="failed",
-        actions=[{"operationId": "restart_service", "reason": "health_check failed"}],
-    )
-    hashed_plan = plan_hash(plan)
-    store.set_diagnosis(
-        incident.id,
-        "run-1",
-        "http://dataplane",
-        [],
-        plan,
-        hashed_plan,
-        plan_expires_at=datetime.now(UTC) + timedelta(minutes=30),
-    )
-    return TestClient(create_app(service)), incident.id, hashed_plan
-
-
-def test_routes_preserve_openapi_and_incident_pages(store: IncidentStore) -> None:
-    client, incident_id, _ = _client_with_incident(store)
+def test_worker_routes_preserve_health_ready_openapi_and_request_id(store: IncidentStore) -> None:
+    service = make_service(store, FakeDDM(), StaticPlanner(Plan(summary="No action", rationale="none", actions=[])))
+    client = TestClient(create_app(service))
 
     assert client.get("/healthz").json() == {"status": "ok"}
     ready = client.get("/readyz", headers={"X-Request-ID": "req-1"})
     assert ready.json() == {"status": "ready"}
     assert ready.headers["X-Request-ID"] == "req-1"
-    assert "DenDenMushi Incident Agent API" in client.get("/openapi.yaml").text
-    response = client.get("/incidents", headers={"x-amzn-oidc-data": _oidc()})
-    assert response.status_code == 200
-    assert "High 5xx" in response.text
-    detail = client.get(f"/incidents/{incident_id}", headers={"x-amzn-oidc-data": _oidc()})
-    assert detail.status_code == 200
-    assert "Approve exact plan" in detail.text
+    assert "DenDenMushi Incident Agent" in client.get("/openapi.yaml").text
 
 
-def test_json_routes_return_safe_incident_payloads(store: IncidentStore) -> None:
-    client, incident_id, hashed_plan = _client_with_incident(store)
-    headers = {"x-amzn-oidc-data": _oidc(["SecurityAnalyst"]), "Accept": "application/json"}
+def test_internal_worker_health_returns_safe_status(store: IncidentStore) -> None:
+    service = make_service(store, FakeDDM(), StaticPlanner(Plan(summary="No action", rationale="none", actions=[])))
+    service.set_consumer_configured(True)
+    service.set_consumer_running(True)
+    client = TestClient(create_app(service))
 
-    listing = client.get("/incidents", headers=headers)
-    assert listing.status_code == 200
-    incident = listing.json()["incidents"][0]
-    assert incident["id"] == incident_id
-    assert incident["alarmName"] == "High 5xx"
-    assert incident["planHash"] == hashed_plan
-    assert "operationsUrl" not in incident
-
-    detail = client.get(f"/incidents/{incident_id}", headers=headers)
-    assert detail.status_code == 200
-    payload = detail.json()
-    assert payload["id"] == incident_id
-    assert payload["plan"]["actions"][0]["operationId"] == "restart_service"
-    assert payload["triage"] is None
-    assert payload["planExpiresAt"] is not None
-    assert payload["isPlanExpired"] is False
-    assert payload["postIncidentStatus"] == ""
-    assert payload["postIncidentSummary"] == ""
-    assert payload["postIncidentReport"]["finalState"] == ""
-    assert payload["timeline"] == []
-    assert payload["approvalDecisions"] == []
-    assert "operationsUrl" not in payload
-    assert "capabilityToken" not in payload
-
-
-def test_json_alert_routes_return_sanitized_payloads(store: IncidentStore) -> None:
-    client, incident_id, _ = _client_with_incident(store)
-    managed_alert = store.create_alert(alert(source_id="alert-source"))
-    store.link_alert(managed_alert.id, incident_id)
-    store.set_alert_status(managed_alert.id, AlertStatus.PENDING_APPROVAL)
-    headers = {"x-amzn-oidc-data": _oidc(["SecurityAnalyst"]), "Accept": "application/json"}
-
-    listing = client.get("/alerts", headers=headers)
-    assert listing.status_code == 200
-    item = listing.json()["alerts"][0]
-    assert item["id"] == managed_alert.id
-    assert item["sourceType"] == "managed-server"
-    assert item["status"] == AlertStatus.PENDING_APPROVAL.value
-    assert item["incidentId"] == incident_id
-    assert item["grouped"] is False
-    assert "rawPayload" not in item
-
-    detail = client.get(f"/alerts/{managed_alert.id}", headers=headers)
-    assert detail.status_code == 200
-    payload = detail.json()
-    assert payload["incident"]["id"] == incident_id
-    assert payload["incident"]["timeline"] == []
-    assert "operationsUrl" not in payload["incident"]
-
-
-def test_agentic_health_returns_safe_status(store: IncidentStore) -> None:
-    client, _, _ = _client_with_incident(store)
-
-    response = client.get("/agentic-ai/health", headers={"x-amzn-oidc-data": _oidc(["SecurityAnalyst"])})
+    response = client.get("/internal/worker/health")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["databaseReady"] is True
-    assert payload["queueConsumerConfigured"] is False
-    assert payload["activeIncidentCount"] == 1
+    assert payload["queueConsumerConfigured"] is True
+    assert payload["queueConsumerRunning"] is True
+    assert payload["activeIncidentCount"] == 0
     assert "queueUrl" not in payload
 
 
-def test_json_decisions_require_manager_or_admin_group(store: IncidentStore) -> None:
-    client, incident_id, hashed_plan = _client_with_incident(store)
+def test_public_agentic_routes_are_no_longer_served_by_worker(store: IncidentStore) -> None:
+    service = make_service(store, FakeDDM(), StaticPlanner(Plan(summary="No action", rationale="none", actions=[])))
+    client = TestClient(create_app(service))
 
-    forbidden = client.post(
-        f"/incidents/{incident_id}/approve",
-        headers={"x-amzn-oidc-data": _oidc(["SecurityAnalyst"]), "Accept": "application/json"},
-        json={"planHash": hashed_plan},
-    )
-    assert forbidden.status_code == 403
-    assert store.get(incident_id).state == IncidentState.AWAITING_APPROVAL
-    denied = store.list_approval_decisions(incident_id)[0]
-    assert denied.outcome == ApprovalOutcome.DENIED
-    assert denied.decision == "APPROVE"
+    assert client.get("/agentic-ai/health").status_code == 404
+    assert client.get("/alerts").status_code == 404
+    assert client.get("/incidents").status_code == 404
 
-    approved = client.post(
-        f"/incidents/{incident_id}/approve",
-        headers={"x-amzn-oidc-data": _oidc(["Admin"]), "Accept": "application/json"},
-        json={"planHash": hashed_plan},
-    )
-    assert approved.status_code == 200
-    assert approved.json()["state"] == IncidentState.EXECUTING.value
-    assert approved.json()["approverSubject"] == "user-1"
-    assert approved.json()["approvalDecisions"][-1]["outcome"] == ApprovalOutcome.SUCCEEDED.value
-
-
-def test_json_decision_plan_hash_drift_returns_conflict(store: IncidentStore) -> None:
-    client, incident_id, _ = _client_with_incident(store)
-
-    response = client.post(
-        f"/incidents/{incident_id}/reject",
-        headers={"x-amzn-oidc-data": _oidc(["Manager"]), "Accept": "application/json"},
-        json={"planHash": "changed"},
-    )
-
-    assert response.status_code == 409
-    assert response.json()["detail"] == "incident changed; reload before deciding"
-    assert store.list_approval_decisions(incident_id)[0].outcome == ApprovalOutcome.CONFLICT
-
-
-def test_incident_routes_require_valid_identity(store: IncidentStore) -> None:
-    client, incident_id, hashed_plan = _client_with_incident(store)
-
-    assert client.get("/incidents", headers={"Accept": "application/json"}).status_code == 401
-    assert client.get(f"/incidents/{incident_id}", headers={"Accept": "application/json"}).status_code == 401
-    assert (
-        client.post(
-            f"/incidents/{incident_id}/approve",
-            headers={"Accept": "application/json"},
-            json={"planHash": hashed_plan},
-        ).status_code
-        == 401
-    )

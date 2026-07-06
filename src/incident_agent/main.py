@@ -26,8 +26,9 @@ def build_service() -> IncidentService:
     if not database_url:
         raise RuntimeError("DATABASE_URL or DATABASE_SECRET_ID is required")
     store = IncidentStore(database_url)
+    controlplane_url = settings.agent_controlplane_url or settings.proxy_controlplane_url
     ddm = DDMClient(
-        settings.proxy_controlplane_url,
+        controlplane_url,
         settings.workload_token_file,
         settings.http_timeout_seconds,
         settings.transient_retry_attempts,
