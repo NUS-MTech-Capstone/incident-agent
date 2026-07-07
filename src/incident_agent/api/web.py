@@ -11,6 +11,10 @@ from incident_agent.models import AgentHealth
 from incident_agent.observability import REQUEST_ID_HEADER, new_request_id, use_request_id
 from incident_agent.service import IncidentService
 
+API_VERSION_HEADER = "x-api-version"
+SUPPORTED_API_VERSION = "1"
+API_VERSION_EXEMPT_PATHS = {"/healthz", "/readyz", "/openapi.yaml", "/asyncapi.yaml"}
+
 
 def create_app(service: IncidentService) -> FastAPI:
     app = FastAPI(title="DenDenMushi Incident Agent Worker API", version="0.1.0")
@@ -22,6 +26,20 @@ def create_app(service: IncidentService) -> FastAPI:
             response = await call_next(request)
             response.headers[REQUEST_ID_HEADER] = request_id
             return response
+
+    @app.middleware("http")
+    async def api_version_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        if request.url.path in API_VERSION_EXEMPT_PATHS:
+            return await call_next(request)
+        if request.headers.get(API_VERSION_HEADER) != SUPPORTED_API_VERSION:
+            return JSONResponse(
+                {"error": f'missing or unsupported {API_VERSION_HEADER}, expected "{SUPPORTED_API_VERSION}"'},
+                status_code=400,
+            )
+        return await call_next(request)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

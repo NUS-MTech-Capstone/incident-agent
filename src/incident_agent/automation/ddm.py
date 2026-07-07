@@ -11,6 +11,9 @@ import httpx
 from incident_agent.models import OperationResult, Run
 from incident_agent.observability import emit_metric
 
+API_VERSION_HEADER = "x-api-version"
+SUPPORTED_API_VERSION = "1"
+
 T = TypeVar("T")
 
 
@@ -49,7 +52,10 @@ class DDMClient:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
                     f"{self.control_plane_url}/automation/runs/{run_id}/close",
-                    headers={"Authorization": f"Bearer {capability_token}"},
+                    headers={
+                        "Authorization": f"Bearer {capability_token}",
+                        API_VERSION_HEADER: SUPPORTED_API_VERSION,
+                    },
                     json={},
                 )
                 response.raise_for_status()
@@ -68,7 +74,10 @@ class DDMClient:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
                     f"{operations_url.rstrip('/')}/automation/runs/{run_id}/operations",
-                    headers={"Authorization": f"Bearer {capability_token}"},
+                    headers={
+                        "Authorization": f"Bearer {capability_token}",
+                        API_VERSION_HEADER: SUPPORTED_API_VERSION,
+                    },
                     json={"operationId": operation_id, "planHash": plan_hash},
                 )
                 response.raise_for_status()
@@ -85,7 +94,10 @@ class DDMClient:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
                     f"{self.control_plane_url}{path}",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        API_VERSION_HEADER: SUPPORTED_API_VERSION,
+                    },
                     json=payload,
                 )
                 response.raise_for_status()

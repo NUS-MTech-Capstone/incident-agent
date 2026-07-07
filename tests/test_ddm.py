@@ -35,5 +35,8 @@ async def test_ddm_start_run_payload(monkeypatch: pytest.MonkeyPatch, tmp_path) 
     run = await client.start_run("inc-1", "host-1", ["health_check"])
     assert run.run_id == "run-1"
     assert captured["url"] == "http://control/automation/runs/start"
-    assert captured["headers"] == {"Authorization": "Bearer workload-token"}
+    assert captured["headers"] == {
+        "Authorization": "Bearer workload-token",
+        "x-api-version": "1",
+    }
     assert json.dumps(captured["json"], sort_keys=True)

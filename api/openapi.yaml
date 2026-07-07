@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: DenDenMushi Incident Agent Worker API
   version: 0.1.0
-  description: Internal worker health endpoints for SQS and Bedrock incident triage. Public Agentic AI APIs are served by agent-controlplane.
+  description: Internal worker health endpoints for SQS and Bedrock incident triage. Public Agentic AI APIs are served by agent-controlplane. Business endpoints require the `x-api-version: 1` header; probe and OpenAPI endpoints are exempt.
 servers:
   - url: http://localhost:8091
 paths:
@@ -85,4 +85,3 @@ components:
           type: integer
         failedIncidentCount:
           type: integer
-

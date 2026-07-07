@@ -25,7 +25,7 @@ def test_internal_worker_health_returns_safe_status(store: IncidentStore) -> Non
     service.set_consumer_running(True)
     client = TestClient(create_app(service))
 
-    response = client.get("/internal/worker/health")
+    response = client.get("/internal/worker/health", headers={"x-api-version": "1"})
 
     assert response.status_code == 200
     payload = response.json()
@@ -40,7 +40,7 @@ def test_public_agentic_routes_are_no_longer_served_by_worker(store: IncidentSto
     service = make_service(store, FakeDDM(), StaticPlanner(Plan(summary="No action", rationale="none", actions=[])))
     client = TestClient(create_app(service))
 
-    assert client.get("/agentic-ai/health").status_code == 404
-    assert client.get("/alerts").status_code == 404
-    assert client.get("/incidents").status_code == 404
-
+    headers = {"x-api-version": "1"}
+    assert client.get("/agentic-ai/health", headers=headers).status_code == 404
+    assert client.get("/alerts", headers=headers).status_code == 404
+    assert client.get("/incidents", headers=headers).status_code == 404
