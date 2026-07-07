@@ -18,6 +18,14 @@ from incident_agent.planning.workflow import IncidentWorkflow
 from incident_agent.service import IncidentService
 
 
+def _database_url_from_secret(secret_id: str, region_name: str) -> str:
+    if not secret_id:
+        return ""
+    client = boto3.client("secretsmanager", region_name=region_name)
+    response = client.get_secret_value(SecretId=secret_id)
+    return str(response.get("SecretString", "")).strip()
+
+
 def build_service() -> IncidentService:
     settings = load_settings()
     configure_langsmith(settings)
@@ -80,20 +88,9 @@ def create_runtime_app() -> FastAPI:
     return app
 
 
-app = create_runtime_app()
-
-
 def main() -> None:
     settings = load_settings()
-    uvicorn.run("incident_agent.main:app", host="0.0.0.0", port=settings.port)  # nosec B104 # noqa: S104
-
-
-def _database_url_from_secret(secret_id: str, region_name: str) -> str:
-    if not secret_id:
-        return ""
-    client = boto3.client("secretsmanager", region_name=region_name)
-    response = client.get_secret_value(SecretId=secret_id)
-    return str(response.get("SecretString", "")).strip()
+    uvicorn.run("incident_agent.main:create_runtime_app", host="0.0.0.0", port=settings.port, factory=True)  # nosec B104 # noqa: S104
 
 
 if __name__ == "__main__":
