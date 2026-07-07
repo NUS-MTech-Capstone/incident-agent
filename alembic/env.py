@@ -6,7 +6,7 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from incident_agent.config import load_settings
-from incident_agent.persistence.store import metadata
+from incident_agent.persistence.store import metadata, normalize_database_url
 
 config = context.config
 if config.config_file_name is not None:
@@ -19,7 +19,7 @@ def _database_url() -> str:
     settings = load_settings()
     if not settings.database_url:
         raise RuntimeError("DATABASE_URL is required for Alembic migrations")
-    return settings.database_url
+    return normalize_database_url(settings.database_url)
 
 
 def run_migrations_offline() -> None:

@@ -54,7 +54,9 @@ LANGSMITH_WORKSPACE_ID=
 ```
 
 `DATABASE_SECRET_ID` must contain the raw Postgres connection URL. Prefer it to
-`DATABASE_URL` in EKS.
+`DATABASE_URL` in EKS. The service accepts `postgres://`, `postgresql://`, and
+`postgresql+psycopg://` URLs, normalizing them to the bundled `psycopg` driver
+before opening the SQLAlchemy engine.
 
 When `LANGSMITH_TRACING=true`, the service reads `LANGSMITH_API_KEY` from the
 environment or fetches it from `LANGSMITH_API_KEY_SECRET_ID` in AWS Secrets
