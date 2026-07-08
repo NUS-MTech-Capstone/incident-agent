@@ -64,6 +64,14 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
+class SuccessfulProbeAccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        method, path, status = _uvicorn_access_fields(record)
+        if method is None or path is None or status is None:
+            return True
+        return not is_successful_probe_request(method, path, status)
+
+
 def configure_logging(log_format: str) -> None:
     handler = logging.StreamHandler()
     if log_format.lower() == "json":
@@ -73,6 +81,24 @@ def configure_logging(log_format: str) -> None:
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(logging.INFO)
+    logging.getLogger("uvicorn.access").addFilter(SuccessfulProbeAccessLogFilter())
+
+
+def is_successful_probe_request(method: str, path: str, status: int) -> bool:
+    return status < 400 and method == "GET" and path in {"/healthz", "/readyz"}
+
+
+def _uvicorn_access_fields(record: logging.LogRecord) -> tuple[str | None, str | None, int | None]:
+    args = record.args
+    if not isinstance(args, tuple) or len(args) < 5:
+        return None, None, None
+    method = str(args[1])
+    path = str(args[2]).split("?", 1)[0]
+    try:
+        status = int(args[4])
+    except (TypeError, ValueError):
+        return None, None, None
+    return method, path, status
 
 
 def sanitize_log_value(key: str, value: object) -> object:

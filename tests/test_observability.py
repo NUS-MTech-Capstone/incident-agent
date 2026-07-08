@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 
-from incident_agent.observability import JsonFormatter, emit_metric, use_request_id
+from incident_agent.observability import JsonFormatter, emit_metric, is_successful_probe_request, use_request_id
 
 
 def test_json_formatter_redacts_sensitive_fields() -> None:
@@ -33,3 +33,11 @@ def test_emit_metric_writes_cloudwatch_emf(monkeypatch, capsys) -> None:
     assert payload["Environment"] == "test"
     assert payload["IncidentReceived"] == 1
     assert payload["requestId"] == "req-1"
+
+
+def test_successful_probe_request_detection() -> None:
+    assert is_successful_probe_request("GET", "/healthz", 200)
+    assert is_successful_probe_request("GET", "/readyz", 204)
+    assert not is_successful_probe_request("GET", "/healthz", 503)
+    assert not is_successful_probe_request("POST", "/healthz", 200)
+    assert not is_successful_probe_request("GET", "/internal/worker/health", 200)

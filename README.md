@@ -202,6 +202,8 @@ GET  /internal/worker/health
 Business endpoints require `x-api-version: 1`. `GET /healthz`, `GET /readyz`,
 and `GET /openapi.yaml` are exempt so probes and spec reads do not need custom
 headers.
+Successful probe access logs are suppressed; failed probe responses still emit
+access logs.
 
 Public Agentic AI routes now live in `agent-controlplane`:
 
