@@ -40,7 +40,8 @@ class IncidentEventType(StrEnum):
     PLAN_APPROVED = "PlanApproved"
     PLAN_REJECTED = "PlanRejected"
     REMEDIATION_STARTED = "RemediationStarted"
-    AUTOMATION_TOKEN_ISSUED = "AutomationTokenIssued"  # noqa: S105 - event type, not a secret
+    # This is an audit event type, not credential material.
+    AUTOMATION_TOKEN_ISSUED = "AutomationTokenIssued"  # noqa: S105  # nosec B105
     OPERATION_EXECUTED = "OperationExecuted"
     REMEDIATION_EXECUTED = "RemediationExecuted"
     REMEDIATION_FAILED = "RemediationFailed"
