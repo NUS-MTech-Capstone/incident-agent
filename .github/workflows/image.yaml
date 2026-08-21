@@ -1,13 +1,14 @@
 name: Image
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [main, master]
-    tags: ["v*"]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
 
 jobs:
   image:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     permissions:
       contents: read
       id-token: write
@@ -15,17 +16,18 @@ jobs:
     with:
       aws-region: ap-southeast-1
       ecr-repository: dendenmushi/incident-agent
-      extra-tags: ${{ github.ref_name }}
+      source-ref: ${{ github.event.workflow_run.head_sha }}
+      image-tag: ${{ github.event.workflow_run.head_sha }}
+      extra-tags: main
     secrets:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
 
   promote:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: image
     uses: NUS-MTech-Capstone/github-actions-shared/.github/workflows/promote-kubernetes-image.yaml@main
     with:
       service-name: incident-agent
       image-name: 000000000000.dkr.ecr.ap-southeast-1.amazonaws.com/dendenmushi/incident-agent
-      image-tag: ${{ github.sha }}
+      image-tag: ${{ github.event.workflow_run.head_sha }}
     secrets:
       GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
