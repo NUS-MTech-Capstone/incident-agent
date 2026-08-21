@@ -94,8 +94,11 @@ def _uvicorn_access_fields(record: logging.LogRecord) -> tuple[str | None, str |
         return None, None, None
     method = str(args[1])
     path = str(args[2]).split("?", 1)[0]
+    raw_status = args[4]
+    if not isinstance(raw_status, (str, bytes, bytearray, int)):
+        return None, None, None
     try:
-        status = int(args[4])
+        status = int(raw_status)
     except (TypeError, ValueError):
         return None, None, None
     return method, path, status
