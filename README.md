@@ -10,8 +10,8 @@ the model and behind explicit validation plus human approval.
 
 The service consumes managed-server CloudWatch alarm notifications from SQS,
 gathers bounded diagnostics through the existing DenDenMushi automation path,
-asks Bedrock through LangChain for structured triage and plan output, stores
-sanitized alert and incident metadata in Postgres. The Go
+asks the configured LLM provider for structured triage and plan output, and
+stores sanitized alert and incident metadata in Postgres. The Go
 `agent-controlplane` exposes Cognito-protected approval pages plus JSON
 endpoints for the Angular Agentic AI UI.
 
@@ -36,7 +36,12 @@ DATABASE_SECRET_ID=
 AGENT_CONTROLPLANE_URL=http://agent-controlplane:8092
 PROXY_CONTROLPLANE_URL=http://proxy-controlplane:8080
 WORKLOAD_TOKEN_FILE=/var/run/secrets/tokens/incident-agent-token
+PLANNER_MODE=bedrock_with_fallback
+OPENAI_MODEL=gpt-5.5
+OPENAI_API_KEY=
+BEDROCK_REGION=us-east-1
 BEDROCK_MODEL_ID=global.amazon.nova-2-lite-v1:0
+BEDROCK_FALLBACK_ENABLED=true
 BEDROCK_MAX_PROMPT_BYTES=131072
 INCIDENT_AGENT_PROMPTS_DIR=
 HTTP_TIMEOUT_SECONDS=10
@@ -65,10 +70,49 @@ available, tracing is disabled and the worker continues so incident processing
 is not blocked by optional observability. The API key, secret ID, prompts, model
 responses, and diagnostic output are not logged.
 
-Bedrock prompt templates live under the repository root `prompts/` directory.
+Planner prompt templates live under the repository root `prompts/` directory.
 `INCIDENT_AGENT_PROMPTS_DIR` may point at another template directory for local
 experiments or environment-specific packaging; if unset, the service resolves
 the root `prompts/` directory and the Docker image copies it to `/app/prompts`.
+`PLANNER_MODE` controls model usage. Dev is configured for Nova 2 Lite through
+Bedrock after the account quota request is approved:
+
+- `bedrock_with_fallback`: Bedrock first, then deterministic fallback on
+  provider invocation failure.
+- `bedrock`: Bedrock only.
+- `openai_with_fallback`: OpenAI Responses API first, then deterministic
+  fallback on provider invocation failure.
+- `openai`: OpenAI Responses API only.
+- `rule_based`: deterministic triage and planning, no LLM calls.
+
+If using the OpenAI planner mode in EKS, create the OpenAI key as a Kubernetes
+Secret before rolling out the deployment:
+
+```bash
+read -rsp "OpenAI API key: " OPENAI_API_KEY
+echo
+kubectl create secret generic incident-agent-openai \
+  -n dendenmushi \
+  --from-literal=openai-api-key="${OPENAI_API_KEY}"
+unset OPENAI_API_KEY
+```
+
+The deployment maps that secret key to `OPENAI_API_KEY`. Do not put the API key
+in this README, Kustomize overlays, Terraform variables, shell history, or
+committed manifests. The OpenAI quickstart documents `OPENAI_API_KEY` as the
+standard environment variable used by OpenAI clients, and the incident agent
+uses the Responses API bearer-auth path.
+
+`BEDROCK_REGION` overrides only the Bedrock runtime client region. Leave
+`AWS_REGION` set to the deployment region for SQS, Secrets Manager, and other
+AWS dependencies. `global.amazon.nova-2-lite-v1:0` in `us-east-1` is the
+configured Bedrock model for dev; if the Nova quota was requested in another
+region, set `BEDROCK_REGION` to that region before rollout.
+Provider fallback modes handle availability errors such as throttling, quota
+exhaustion, and network failures by using the deterministic `RuleBasedPlanner`.
+Invalid model JSON, oversized prompts, and plan validation failures still fail
+the incident because those are correctness or safety failures, not provider
+availability failures.
 
 CloudWatch alarm descriptions must be JSON:
 
@@ -92,7 +136,7 @@ SQS alert
 -> Incident Manager Agent
 -> Triage Agent
 -> Evidence Collector Agent using DDM automation operations
--> Action Plan Agent using structured Bedrock or rule-based output
+-> Action Plan Agent using structured LLM or rule-based output
 -> Action Plan Reviewer Agent with deterministic guardrails and plan hash
 -> await human approval
 -> Remediation Executor Agent for the single approved v1 remediation operation

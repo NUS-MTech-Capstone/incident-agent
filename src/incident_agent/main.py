@@ -8,12 +8,12 @@ from fastapi import FastAPI
 
 from incident_agent.api.web import create_app
 from incident_agent.automation.ddm import DDMClient
-from incident_agent.config import load_settings
+from incident_agent.config import Settings, load_settings
 from incident_agent.ingest.sqs import SQSConsumer
 from incident_agent.langsmith import configure_langsmith
 from incident_agent.observability import configure_logging
 from incident_agent.persistence.store import IncidentStore
-from incident_agent.planning.planner import BedrockPlanner
+from incident_agent.planning.planner import BedrockPlanner, FallbackPlanner, OpenAIPlanner, RuleBasedPlanner
 from incident_agent.planning.workflow import IncidentWorkflow
 from incident_agent.service import IncidentService
 
@@ -43,13 +43,7 @@ def build_service() -> IncidentService:
         settings.http_timeout_seconds,
         settings.transient_retry_attempts,
     )
-    planner = BedrockPlanner(
-        settings.bedrock_model_id,
-        settings.bedrock_max_prompt_bytes,
-        settings.aws_region,
-        settings.incident_agent_prompts_dir,
-        settings.transient_retry_attempts,
-    )
+    planner = _build_planner(settings)
     workflow = IncidentWorkflow(planner, ddm, settings.operation_timeout_seconds, settings.max_operation_output_bytes)
     return IncidentService(
         store,
@@ -57,6 +51,40 @@ def build_service() -> IncidentService:
         ddm,
         settings.operation_timeout_seconds,
         settings.max_operation_output_bytes,
+    )
+
+
+def _build_planner(settings: Settings) -> BedrockPlanner | FallbackPlanner | OpenAIPlanner | RuleBasedPlanner:
+    mode = settings.planner_mode.strip().lower()
+    if mode == "rule_based":
+        return RuleBasedPlanner()
+    if mode in {"openai", "openai_with_fallback"}:
+        if not settings.openai_api_key.strip():
+            raise RuntimeError("OPENAI_API_KEY is required when PLANNER_MODE uses OpenAI")
+        openai_planner = OpenAIPlanner(
+            settings.openai_api_key,
+            settings.openai_model,
+            settings.bedrock_max_prompt_bytes,
+            settings.incident_agent_prompts_dir,
+            settings.http_timeout_seconds,
+            settings.transient_retry_attempts,
+        )
+        if mode == "openai":
+            return openai_planner
+        return FallbackPlanner(openai_planner, RuleBasedPlanner())
+    bedrock_planner = BedrockPlanner(
+        settings.bedrock_model_id,
+        settings.bedrock_max_prompt_bytes,
+        settings.bedrock_region or settings.aws_region,
+        settings.incident_agent_prompts_dir,
+        settings.transient_retry_attempts,
+    )
+    if mode == "bedrock":
+        return bedrock_planner
+    if mode == "bedrock_with_fallback":
+        return FallbackPlanner(bedrock_planner, RuleBasedPlanner())
+    raise ValueError(
+        "PLANNER_MODE must be one of: rule_based, openai, openai_with_fallback, bedrock, bedrock_with_fallback"
     )
 
 

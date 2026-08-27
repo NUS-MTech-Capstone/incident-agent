@@ -19,7 +19,12 @@ class Settings(BaseSettings):
         default="/var/run/secrets/tokens/incident-agent-token",
         alias="WORKLOAD_TOKEN_FILE",
     )
+    planner_mode: str = Field(default="bedrock_with_fallback", alias="PLANNER_MODE")
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-5.5", alias="OPENAI_MODEL")
+    bedrock_region: str = Field(default="", alias="BEDROCK_REGION")
     bedrock_model_id: str = Field(default="global.amazon.nova-2-lite-v1:0", alias="BEDROCK_MODEL_ID")
+    bedrock_fallback_enabled: bool = Field(default=True, alias="BEDROCK_FALLBACK_ENABLED")
     bedrock_max_prompt_bytes: int = Field(default=131072, alias="BEDROCK_MAX_PROMPT_BYTES")
     incident_agent_prompts_dir: str = Field(default="", alias="INCIDENT_AGENT_PROMPTS_DIR")
     http_timeout_seconds: float = Field(default=10.0, alias="HTTP_TIMEOUT_SECONDS")

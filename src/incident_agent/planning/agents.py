@@ -26,7 +26,23 @@ REMEDIATION_EXECUTOR_AGENT = "Remediation Executor Agent"
 
 
 def agent_definitions(planner_type: str) -> list[ExplanationAgent]:
-    model_reasoning = "Bedrock LLM structured reasoning" if planner_type == "bedrock" else "deterministic rules"
+    uses_bedrock = planner_type.startswith("bedrock")
+    uses_openai = planner_type.startswith("openai")
+    if uses_bedrock:
+        model_reasoning = "Bedrock LLM structured reasoning"
+        planner_tool = "Bedrock via LangChain"
+    elif uses_openai:
+        model_reasoning = "OpenAI LLM structured reasoning"
+        planner_tool = "OpenAI Responses API"
+    else:
+        model_reasoning = "deterministic rules"
+        planner_tool = "RuleBasedPlanner"
+    if planner_type == "bedrock_with_rule_fallback":
+        model_reasoning = "Bedrock LLM structured reasoning with deterministic fallback"
+        planner_tool = "Bedrock via LangChain, RuleBasedPlanner"
+    if planner_type == "openai_with_rule_fallback":
+        model_reasoning = "OpenAI LLM structured reasoning with deterministic fallback"
+        planner_tool = "OpenAI Responses API, RuleBasedPlanner"
     return [
         ExplanationAgent(
             name=INCIDENT_MANAGER_AGENT,
@@ -53,7 +69,7 @@ def agent_definitions(planner_type: str) -> list[ExplanationAgent]:
             ],
             reasoningType=model_reasoning,
             memory="incident-local prompt context only; no cross-incident memory",
-            tools=["Bedrock via LangChain" if planner_type == "bedrock" else "RuleBasedPlanner"],
+            tools=[planner_tool],
             inputs=["alarm name", "host ID", "sanitized alarm reason"],
             outputs=["TriageResult"],
             handoffTo=EVIDENCE_COLLECTOR_AGENT,
@@ -83,7 +99,7 @@ def agent_definitions(planner_type: str) -> list[ExplanationAgent]:
             ],
             reasoningType=model_reasoning,
             memory="incident-local evidence context only; no long-term memory",
-            tools=["Bedrock via LangChain" if planner_type == "bedrock" else "RuleBasedPlanner"],
+            tools=[planner_tool],
             inputs=["incident metadata", "bounded diagnostic evidence"],
             outputs=["candidate Plan"],
             handoffTo=ACTION_PLAN_REVIEWER_AGENT,

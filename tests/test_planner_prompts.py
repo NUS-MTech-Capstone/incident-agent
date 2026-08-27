@@ -7,8 +7,15 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from incident_agent.models import Incident, IncidentState, OperationResult
-from incident_agent.planning.planner import BedrockPlanner
+from incident_agent.models import ExplanationModel, Incident, IncidentState, OperationResult
+from incident_agent.planning.planner import (
+    BedrockInvocationError,
+    BedrockPlanner,
+    FallbackPlanner,
+    OpenAIPlanner,
+    RuleBasedPlanner,
+    _extract_openai_text,
+)
 from incident_agent.planning.prompt_loader import PromptLoader
 from tests.conftest import alert
 
@@ -21,6 +28,17 @@ class FakeChatModel:
     async def ainvoke(self, messages: list[Any]) -> AIMessage:
         self.calls.append(messages)
         return AIMessage(content=self.responses.pop(0))
+
+
+class FailingPlanner:
+    def explain_model(self):
+        return ExplanationModel(provider="bedrock", plannerType="bedrock", modelId="test-model")
+
+    async def triage(self, incident: Incident):
+        raise BedrockInvocationError("quota exhausted")
+
+    async def plan(self, incident: Incident, evidence: list[OperationResult]):
+        raise BedrockInvocationError("quota exhausted")
 
 
 @pytest.fixture
@@ -62,6 +80,56 @@ async def test_bedrock_planner_sends_system_and_human_plan_messages(prompts_dir:
     assert isinstance(model.calls[0][1], HumanMessage)
     assert model.calls[0][0].content == "plan system"
     assert '"operationId": "health_check"' in str(model.calls[0][1].content)
+
+
+@pytest.mark.asyncio
+async def test_fallback_planner_uses_rules_when_bedrock_invocation_fails() -> None:
+    planner = FallbackPlanner(FailingPlanner(), RuleBasedPlanner())
+    incident = _incident()
+
+    triage = await planner.triage(incident)
+    plan = await planner.plan(
+        incident,
+        [
+            OperationResult(operationId="service_status", stdout="active", exitCode=0),
+            OperationResult(operationId="health_check", stdout="unhealthy", exitCode=1),
+        ],
+    )
+
+    assert triage.rationale == "Deterministic fallback triage based on alarm reason."
+    assert [action.operation_id for action in plan.actions] == ["recover_demo_app"]
+
+
+def test_openai_planner_explain_model_identifies_provider(prompts_dir: Path) -> None:
+    planner = OpenAIPlanner("test-key", "gpt-5.5", 4096, prompts_dir)
+
+    model = planner.explain_model()
+
+    assert model.provider == "openai"
+    assert model.planner_type == "openai"
+    assert model.model_id == "gpt-5.5"
+
+
+def test_extract_openai_text_supports_output_text() -> None:
+    assert _extract_openai_text({"output_text": "hello"}) == "hello"
+
+
+def test_extract_openai_text_supports_output_content_parts() -> None:
+    assert (
+        _extract_openai_text(
+            {
+                "output": [
+                    {
+                        "content": [
+                            {"type": "output_text", "text": "hello"},
+                            {"type": "output_text", "text": " world"},
+                        ]
+                    }
+                ]
+            }
+        )
+        == "hello world"
+    )
 
 
 def _planner(model: FakeChatModel, prompts_dir: Path) -> BedrockPlanner:
