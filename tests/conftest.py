@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from incident_agent.automation.ddm import DDMClient
 from incident_agent.models import Alert, Incident, OperationResult, Plan, Priority, Run, TriageResult
-from incident_agent.persistence.store import IncidentStore
+from incident_agent.persistence.store import IncidentStore, metadata
 from incident_agent.planning.planner import RuleBasedPlanner
 from incident_agent.planning.workflow import IncidentWorkflow
 from incident_agent.service import IncidentService
@@ -81,6 +81,7 @@ def store() -> IncidentStore:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    metadata.create_all(engine)
     return IncidentStore.from_engine(engine)
 
 

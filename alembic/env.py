@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
@@ -17,9 +18,10 @@ target_metadata = metadata
 
 def _database_url() -> str:
     settings = load_settings()
-    if not settings.database_url:
+    database_url = os.getenv("DATABASE_URL", "") or settings.database_url
+    if not database_url:
         raise RuntimeError("DATABASE_URL is required for Alembic migrations")
-    return normalize_database_url(settings.database_url)
+    return normalize_database_url(database_url)
 
 
 def run_migrations_offline() -> None:

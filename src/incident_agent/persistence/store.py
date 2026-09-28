@@ -3,10 +3,27 @@ from __future__ import annotations
 import builtins
 import json
 import secrets
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, MetaData, String, Table, Text, create_engine, select
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    and_,
+    create_engine,
+    or_,
+    select,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
@@ -46,7 +63,32 @@ class Duplicate(StoreError):
     pass
 
 
+class ClaimDisposition(StrEnum):
+    PROCESS = "PROCESS"
+    GROUPED = "GROUPED"
+    ACK_EXISTING = "ACK_EXISTING"
+    RETRY_BUSY = "RETRY_BUSY"
+
+
+@dataclass(frozen=True)
+class IngestClaim:
+    disposition: ClaimDisposition
+    alert: ManagedAlert
+    incident: Incident | None = None
+    claim_token: str = ""
+    created_incident: bool = False
+    reclaimed: bool = False
+
+
 metadata = MetaData()
+
+ACTIVE_INCIDENT_STATES = (
+    IncidentState.DIAGNOSING.value,
+    IncidentState.AWAITING_APPROVAL.value,
+    IncidentState.EXECUTING.value,
+)
+# Empty is the persisted "unclaimed" sentinel, not authentication material.
+EMPTY_CLAIM_TOKEN = ""  # nosec B105
 
 alerts = Table(
     "alerts",
@@ -78,6 +120,7 @@ incidents = Table(
     Column("alarm_name", Text, nullable=False),
     Column("host_id", Text, nullable=False),
     Column("runbook_version", Text, nullable=False, default=""),
+    Column("group_key", Text, nullable=False, default=""),
     Column("state", Text, nullable=False),
     Column("reason", Text, nullable=False, default=""),
     Column("run_id", Text, nullable=False, default=""),
@@ -94,8 +137,24 @@ incidents = Table(
     Column("report", Text, nullable=False, default=""),
     Column("report_json", JSON().with_variant(JSONB, "postgresql"), nullable=False, default={}),
     Column("error_message", Text, nullable=False, default=""),
+    Column("processing_claim_token", Text, nullable=False, default=""),
+    Column("processing_owner_id", Text, nullable=False, default=""),
+    Column("processing_lease_expires_at", DateTime(timezone=True), nullable=True),
+    Column("processing_attempt", Integer, nullable=False, default=0),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+_active_group_predicate = and_(
+    incidents.c.group_key != "",
+    incidents.c.state.in_(ACTIVE_INCIDENT_STATES),
+)
+Index(
+    "incidents_active_group_unique",
+    incidents.c.group_key,
+    unique=True,
+    postgresql_where=_active_group_predicate,
+    sqlite_where=_active_group_predicate,
 )
 
 incident_events = Table(
@@ -136,13 +195,11 @@ def normalize_database_url(database_url: str) -> str:
 class IncidentStore:
     def __init__(self, database_url: str):
         self.engine = create_engine(normalize_database_url(database_url), future=True)
-        metadata.create_all(self.engine)
 
     @classmethod
     def from_engine(cls, engine: Engine) -> IncidentStore:
         obj = cls.__new__(cls)
         obj.engine = engine
-        metadata.create_all(engine)
         return obj
 
     def close(self) -> None:
@@ -266,6 +323,220 @@ class IncidentStore:
             raise Duplicate("alert source already exists") from exc
         return self.get_alert(alert_id)
 
+    def ingest_and_claim(
+        self,
+        alert: Alert,
+        owner_id: str,
+        lease_duration: timedelta,
+    ) -> IngestClaim:
+        """Atomically persist an ALARM, group it, or fence its diagnosis owner."""
+        if alert.state != "ALARM":
+            raise ValueError("only ALARM alerts can acquire an incident claim")
+        if not alert.group_key:
+            raise ValueError("group_key is required for incident claiming")
+        now = _utcnow()
+        lease_expires_at = now + lease_duration
+        alert_id = "alert-" + secrets.token_hex(16)
+        alert_values = _alert_values(alert, alert_id, now)
+        claim_token = secrets.token_urlsafe(32)
+
+        with self.engine.begin() as conn:
+            alert_row: Any = (
+                conn.execute(select(alerts).where(alerts.c.source_id == alert.source_id).with_for_update())
+                .mappings()
+                .first()
+            )
+            alert_was_new = alert_row is None
+            if alert_was_new:
+                try:
+                    with conn.begin_nested():
+                        conn.execute(alerts.insert().values(**alert_values))
+                    alert_row = alert_values
+                except IntegrityError:
+                    alert_row = (
+                        conn.execute(select(alerts).where(alerts.c.source_id == alert.source_id).with_for_update())
+                        .mappings()
+                        .one()
+                    )
+            if alert_row is None:
+                raise NotFound("alert not found after ingestion")
+
+            linked_incident_id = str(alert_row["incident_id"] or "")
+            if not alert_was_new and linked_incident_id:
+                incident_row = (
+                    conn.execute(select(incidents).where(incidents.c.id == linked_incident_id).with_for_update())
+                    .mappings()
+                    .first()
+                )
+                if incident_row is None:
+                    raise NotFound("linked incident not found")
+                return self._claim_existing(conn, alert_row, incident_row, owner_id, claim_token, now, lease_expires_at)
+
+            active_row = (
+                conn.execute(
+                    select(incidents)
+                    .where(incidents.c.group_key == alert.group_key, incidents.c.state.in_(ACTIVE_INCIDENT_STATES))
+                    .order_by(incidents.c.created_at.asc())
+                    .limit(1)
+                    .with_for_update()
+                )
+                .mappings()
+                .first()
+            )
+            if active_row is not None:
+                if not alert_was_new and active_row["source_id"] == alert.source_id:
+                    return self._claim_existing(
+                        conn,
+                        alert_row,
+                        active_row,
+                        owner_id,
+                        claim_token,
+                        now,
+                        lease_expires_at,
+                    )
+                status = _alert_status_for_state(IncidentState(active_row["state"]))
+                conn.execute(
+                    alerts.update()
+                    .where(alerts.c.id == alert_row["id"])
+                    .values(
+                        incident_id=active_row["id"],
+                        grouped=True,
+                        status=status.value,
+                        updated_at=now,
+                    )
+                )
+                linked_alert = conn.execute(select(alerts).where(alerts.c.id == alert_row["id"])).mappings().one()
+                return IngestClaim(
+                    ClaimDisposition.GROUPED,
+                    _alert_from_row(linked_alert),
+                    _incident_from_row(active_row),
+                )
+
+            incident_id = "inc-" + secrets.token_hex(16)
+            incident_values = _incident_values(alert, incident_id, now)
+            incident_values.update(
+                {
+                    "processing_claim_token": claim_token,
+                    "processing_owner_id": owner_id,
+                    "processing_lease_expires_at": lease_expires_at,
+                    "processing_attempt": 1,
+                }
+            )
+            try:
+                with conn.begin_nested():
+                    conn.execute(incidents.insert().values(**incident_values))
+            except IntegrityError:
+                active_row = (
+                    conn.execute(
+                        select(incidents)
+                        .where(incidents.c.group_key == alert.group_key, incidents.c.state.in_(ACTIVE_INCIDENT_STATES))
+                        .order_by(incidents.c.created_at.asc())
+                        .limit(1)
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .first()
+                )
+                if active_row is None:
+                    raise Duplicate("incident source already exists") from None
+                status = _alert_status_for_state(IncidentState(active_row["state"]))
+                conn.execute(
+                    alerts.update()
+                    .where(alerts.c.id == alert_row["id"])
+                    .values(incident_id=active_row["id"], grouped=True, status=status.value, updated_at=now)
+                )
+                linked_alert = conn.execute(select(alerts).where(alerts.c.id == alert_row["id"])).mappings().one()
+                return IngestClaim(
+                    ClaimDisposition.GROUPED,
+                    _alert_from_row(linked_alert),
+                    _incident_from_row(active_row),
+                )
+
+            conn.execute(
+                alerts.update()
+                .where(alerts.c.id == alert_row["id"])
+                .values(incident_id=incident_id, status=AlertStatus.TRIAGING.value, updated_at=now)
+            )
+            linked_alert = conn.execute(select(alerts).where(alerts.c.id == alert_row["id"])).mappings().one()
+            incident_row = conn.execute(select(incidents).where(incidents.c.id == incident_id)).mappings().one()
+            return IngestClaim(
+                ClaimDisposition.PROCESS,
+                _alert_from_row(linked_alert),
+                _incident_from_row(incident_row),
+                claim_token,
+                created_incident=True,
+            )
+
+    def _claim_existing(
+        self,
+        conn: Any,
+        alert_row: Any,
+        incident_row: Any,
+        owner_id: str,
+        claim_token: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> IngestClaim:
+        incident = _incident_from_row(incident_row)
+        managed_alert = _alert_from_row(alert_row)
+        if incident.state != IncidentState.DIAGNOSING:
+            return IngestClaim(ClaimDisposition.ACK_EXISTING, managed_alert, incident)
+        current_token = str(incident_row["processing_claim_token"] or "")
+        current_expiry = incident_row["processing_lease_expires_at"]
+        if current_token and current_expiry is not None and _as_utc(current_expiry) > now:
+            return IngestClaim(ClaimDisposition.RETRY_BUSY, managed_alert, incident)
+        result = conn.execute(
+            incidents.update()
+            .where(
+                incidents.c.id == incident.id,
+                incidents.c.state == IncidentState.DIAGNOSING.value,
+                or_(
+                    incidents.c.processing_claim_token == EMPTY_CLAIM_TOKEN,
+                    incidents.c.processing_lease_expires_at.is_(None),
+                    incidents.c.processing_lease_expires_at <= now,
+                ),
+            )
+            .values(
+                processing_claim_token=claim_token,
+                processing_owner_id=owner_id,
+                processing_lease_expires_at=lease_expires_at,
+                processing_attempt=incidents.c.processing_attempt + 1,
+                updated_at=now,
+            )
+        )
+        if result.rowcount == 0:
+            return IngestClaim(ClaimDisposition.RETRY_BUSY, managed_alert, incident)
+        claimed_row = conn.execute(select(incidents).where(incidents.c.id == incident.id)).mappings().one()
+        return IngestClaim(
+            ClaimDisposition.PROCESS,
+            managed_alert,
+            _incident_from_row(claimed_row),
+            claim_token,
+            reclaimed=True,
+        )
+
+    def renew_claim(self, incident_id: str, claim_token: str, lease_duration: timedelta) -> bool:
+        now = _utcnow()
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                incidents.update()
+                .where(
+                    incidents.c.id == incident_id,
+                    incidents.c.state == IncidentState.DIAGNOSING.value,
+                    incidents.c.processing_claim_token == claim_token,
+                    incidents.c.processing_lease_expires_at > now,
+                )
+                .values(processing_lease_expires_at=now + lease_duration, updated_at=now)
+            )
+        return result.rowcount == 1
+
+    def processing_attempt(self, incident_id: str) -> int:
+        with self.engine.begin() as conn:
+            row = conn.execute(select(incidents.c.processing_attempt).where(incidents.c.id == incident_id)).first()
+        if row is None:
+            raise NotFound("incident not found")
+        return int(row[0])
+
     def get_alert(self, alert_id: str) -> ManagedAlert:
         with self.engine.begin() as conn:
             row = conn.execute(select(alerts).where(alerts.c.id == alert_id)).mappings().first()
@@ -357,32 +628,9 @@ class IncidentStore:
     def create(self, alert: Alert) -> Incident:
         now = _utcnow()
         incident_id = "inc-" + secrets.token_hex(16)
-        row: dict[str, Any] = {
-            "id": incident_id,
-            "source_id": alert.source_id,
-            "alarm_arn": alert.alarm_arn,
-            "alarm_name": alert.alarm_name,
-            "host_id": alert.host_id,
-            "runbook_version": alert.runbook_version,
-            "state": IncidentState.DIAGNOSING.value,
-            "reason": alert.reason,
-            "run_id": "",
-            "operations_url": "",
-            "evidence_json": [],
-            "triage_json": {},
-            "plan_json": {},
-            "plan_hash": "",
-            "explanation_json": {},
-            "plan_expires_at": None,
-            "approver_subject": "",
-            "approval_decision": "",
-            "approval_at": None,
-            "report": "",
-            "report_json": {},
-            "error_message": "",
-            "created_at": now,
-            "updated_at": now,
-        }
+        row = _incident_values(alert, incident_id, now)
+        # Legacy/unit-test creation bypasses claim ownership and therefore does not reserve an active group.
+        row["group_key"] = ""
         try:
             with self.engine.begin() as conn:
                 conn.execute(incidents.insert().values(**row))
@@ -414,6 +662,7 @@ class IncidentStore:
         triage: TriageResult | None = None,
         plan_expires_at: datetime | None = None,
         explanation: IncidentExplanation | None = None,
+        claim_token: str | None = None,
     ) -> None:
         state = IncidentState.AWAITING_APPROVAL
         report = ""
@@ -444,18 +693,37 @@ class IncidentStore:
                 "state": state.value,
                 "report": report,
                 "report_json": report_json,
+                "processing_claim_token": EMPTY_CLAIM_TOKEN,
+                "processing_owner_id": "",
+                "processing_lease_expires_at": None,
             },
+            claim_token,
         )
 
-    def set_failure(self, incident_id: str, message: str) -> None:
+    def set_failure(self, incident_id: str, message: str, claim_token: str | None = None) -> None:
+        conditions = [
+            incidents.c.id == incident_id,
+            incidents.c.state.in_([IncidentState.DIAGNOSING.value, IncidentState.EXECUTING.value]),
+        ]
+        if claim_token:
+            conditions.extend(
+                [
+                    incidents.c.state == IncidentState.DIAGNOSING.value,
+                    incidents.c.processing_claim_token == claim_token,
+                ]
+            )
         with self.engine.begin() as conn:
             result = conn.execute(
                 incidents.update()
-                .where(
-                    incidents.c.id == incident_id,
-                    incidents.c.state.in_([IncidentState.DIAGNOSING.value, IncidentState.EXECUTING.value]),
+                .where(*conditions)
+                .values(
+                    state=IncidentState.FAILED.value,
+                    error_message=message,
+                    processing_claim_token=EMPTY_CLAIM_TOKEN,
+                    processing_owner_id="",
+                    processing_lease_expires_at=None,
+                    updated_at=_utcnow(),
                 )
-                .values(state=IncidentState.FAILED.value, error_message=message, updated_at=_utcnow())
             )
         if result.rowcount == 0:
             raise Conflict("incident state conflict")
@@ -492,6 +760,9 @@ class IncidentStore:
                             final_state=IncidentState.RECOVERED.value,
                             resolved_at=_utcnow(),
                         ).model_dump(mode="json"),
+                        processing_claim_token=EMPTY_CLAIM_TOKEN,
+                        processing_owner_id="",
+                        processing_lease_expires_at=None,
                         updated_at=_utcnow(),
                     )
                 )
@@ -565,14 +836,19 @@ class IncidentStore:
         if result.rowcount == 0:
             raise Conflict("incident changed; reload before deciding")
 
-    def _update_state(self, incident_id: str, expected: IncidentState, values: dict[str, Any]) -> None:
+    def _update_state(
+        self,
+        incident_id: str,
+        expected: IncidentState,
+        values: dict[str, Any],
+        claim_token: str | None = None,
+    ) -> None:
         values["updated_at"] = _utcnow()
+        conditions = [incidents.c.id == incident_id, incidents.c.state == expected.value]
+        if claim_token:
+            conditions.append(incidents.c.processing_claim_token == claim_token)
         with self.engine.begin() as conn:
-            result = conn.execute(
-                incidents.update()
-                .where(incidents.c.id == incident_id, incidents.c.state == expected.value)
-                .values(**values)
-            )
+            result = conn.execute(incidents.update().where(*conditions).values(**values))
         if result.rowcount == 0:
             raise Conflict("incident state conflict")
 
@@ -656,6 +932,79 @@ def _approval_decision_from_row(row: Any) -> ApprovalDecisionAudit:
         error_reason=row["error_reason"] or "",
         created_at=row["created_at"],
     )
+
+
+def _alert_values(alert: Alert, alert_id: str, now: datetime) -> dict[str, Any]:
+    return {
+        "id": alert_id,
+        "source_id": alert.source_id,
+        "source_type": alert.source_type,
+        "alarm_arn": alert.alarm_arn,
+        "alarm_name": alert.alarm_name,
+        "cloudwatch_state": alert.state,
+        "host_id": alert.host_id,
+        "reason": alert.reason,
+        "status": AlertStatus.RECEIVED.value,
+        "group_key": alert.group_key,
+        "incident_id": "",
+        "grouped": False,
+        "error_summary": "",
+        "occurred_at": alert.occurred_at,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _incident_values(alert: Alert, incident_id: str, now: datetime) -> dict[str, Any]:
+    return {
+        "id": incident_id,
+        "source_id": alert.source_id,
+        "alarm_arn": alert.alarm_arn,
+        "alarm_name": alert.alarm_name,
+        "host_id": alert.host_id,
+        "runbook_version": alert.runbook_version,
+        "group_key": alert.group_key,
+        "state": IncidentState.DIAGNOSING.value,
+        "reason": alert.reason,
+        "run_id": "",
+        "operations_url": "",
+        "evidence_json": [],
+        "triage_json": {},
+        "plan_json": {},
+        "plan_hash": "",
+        "explanation_json": {},
+        "plan_expires_at": None,
+        "approver_subject": "",
+        "approval_decision": "",
+        "approval_at": None,
+        "report": "",
+        "report_json": {},
+        "error_message": "",
+        "processing_claim_token": EMPTY_CLAIM_TOKEN,
+        "processing_owner_id": "",
+        "processing_lease_expires_at": None,
+        "processing_attempt": 0,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _alert_status_for_state(state: IncidentState) -> AlertStatus:
+    if state == IncidentState.DIAGNOSING:
+        return AlertStatus.TRIAGING
+    if state == IncidentState.AWAITING_APPROVAL:
+        return AlertStatus.PENDING_APPROVAL
+    if state == IncidentState.EXECUTING:
+        return AlertStatus.EXECUTING
+    if state == IncidentState.REJECTED:
+        return AlertStatus.REJECTED
+    if state in {IncidentState.COMPLETED, IncidentState.RECOVERED}:
+        return AlertStatus.RESOLVED
+    return AlertStatus.FAILED
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _load_json(value: Any, fallback: Any) -> Any:

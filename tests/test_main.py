@@ -53,3 +53,8 @@ def test_build_planner_rejects_unknown_mode() -> None:
 
     with pytest.raises(ValueError, match="PLANNER_MODE"):
         module._build_planner(Settings(PLANNER_MODE="bad"))
+
+
+def test_settings_require_claim_renewal_before_expiry() -> None:
+    with pytest.raises(ValueError, match="INCIDENT_CLAIM_RENEW_SECONDS"):
+        Settings(INCIDENT_CLAIM_LEASE_SECONDS=30, INCIDENT_CLAIM_RENEW_SECONDS=30)

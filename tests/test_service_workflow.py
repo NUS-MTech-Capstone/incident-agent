@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -13,7 +14,7 @@ from incident_agent.models import (
     OperationResult,
     Plan,
 )
-from incident_agent.persistence.store import Conflict, IncidentStore, incidents
+from incident_agent.persistence.store import ClaimDisposition, Conflict, IncidentStore, incidents
 from incident_agent.planning.agents import (
     ACTION_PLAN_AGENT,
     ACTION_PLAN_REVIEWER_AGENT,
@@ -192,6 +193,103 @@ async def test_duplicate_active_alarm_groups_into_existing_incident(store: Incid
     assert all(item.incident_id == incidents_list[0].id for item in alerts)
     assert len(ddm.started) == 1
     assert IncidentEventType.ALERT_GROUPED in [event.event_type for event in store.list_events(incidents_list[0].id)]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_alerts_for_same_group_start_one_workflow(store: IncidentStore) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingPlanner(StaticPlanner):
+        async def triage(self, incident: Incident):  # type: ignore[no-untyped-def]
+            entered.set()
+            await release.wait()
+            return await super().triage(incident)
+
+    ddm = FakeDDM()
+    planner = BlockingPlanner(Plan(summary="No action", rationale="No remediation required", actions=[]))
+    service = make_service(store, ddm, planner)
+
+    first = asyncio.create_task(service.handle_alert(alert(source_id="alarm-state-1")))
+    await entered.wait()
+    second_result = await service.handle_alert(alert(source_id="alarm-state-2"))
+    release.set()
+    first_result = await first
+
+    assert first_result == ClaimDisposition.PROCESS
+    assert second_result == ClaimDisposition.GROUPED
+    assert len(store.list()) == 1
+    assert len(store.list_alerts()) == 2
+    assert len(ddm.started) == 1
+
+
+def test_same_source_redelivery_waits_for_live_claim_and_reclaims_expired_claim(store: IncidentStore) -> None:
+    source = alert()
+    first = store.ingest_and_claim(source, "worker-1", timedelta(minutes=2))
+    busy = store.ingest_and_claim(source, "worker-2", timedelta(minutes=2))
+
+    assert first.disposition == ClaimDisposition.PROCESS
+    assert busy.disposition == ClaimDisposition.RETRY_BUSY
+
+    with store.engine.begin() as conn:
+        conn.execute(
+            incidents.update()
+            .where(incidents.c.id == first.incident.id)
+            .values(processing_lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+    reclaimed = store.ingest_and_claim(source, "worker-2", timedelta(minutes=2))
+
+    assert reclaimed.disposition == ClaimDisposition.PROCESS
+    assert reclaimed.reclaimed
+    assert reclaimed.claim_token != first.claim_token
+    assert store.processing_attempt(first.incident.id) == 2
+    assert not store.renew_claim(first.incident.id, first.claim_token, timedelta(minutes=2))
+    with pytest.raises(Conflict):
+        store.set_diagnosis(
+            first.incident.id,
+            "run-stale",
+            "http://dataplane",
+            [],
+            Plan(summary="No action", rationale="stale", actions=[]),
+            "stale-hash",
+            claim_token=first.claim_token,
+        )
+
+
+def test_recovery_invalidates_diagnosis_claim(store: IncidentStore) -> None:
+    source = alert()
+    claim = store.ingest_and_claim(source, "worker-1", timedelta(minutes=2))
+
+    recovered = store.recover_by_alarm(source.alarm_arn, source.group_key)
+
+    assert recovered[0].state == IncidentState.RECOVERED
+    assert not store.renew_claim(claim.incident.id, claim.claim_token, timedelta(minutes=2))
+    with pytest.raises(Conflict):
+        store.set_diagnosis(
+            claim.incident.id,
+            "run-stale",
+            "http://dataplane",
+            [],
+            Plan(summary="No action", rationale="stale", actions=[]),
+            "stale-hash",
+            claim_token=claim.claim_token,
+        )
+
+
+@pytest.mark.asyncio
+async def test_terminal_incident_releases_group_for_new_alarm(store: IncidentStore) -> None:
+    ddm = FakeDDM()
+    service = make_service(
+        store,
+        ddm,
+        StaticPlanner(Plan(summary="No action", rationale="No remediation required", actions=[])),
+    )
+
+    await service.handle_alert(alert(source_id="alarm-state-1"))
+    await service.handle_alert(alert(source_id="alarm-state-2"))
+
+    assert len(store.list()) == 2
+    assert len(ddm.started) == 2
 
 
 @pytest.mark.asyncio

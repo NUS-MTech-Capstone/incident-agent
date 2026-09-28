@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     max_operation_output_bytes: int = Field(default=262144, alias="MAX_OPERATION_OUTPUT_BYTES")
     sqs_poll_wait_seconds: int = Field(default=20, alias="SQS_POLL_WAIT_SECONDS")
     sqs_visibility_timeout_seconds: int = Field(default=600, alias="SQS_VISIBILITY_TIMEOUT_SECONDS")
+    incident_claim_lease_seconds: int = Field(default=120, alias="INCIDENT_CLAIM_LEASE_SECONDS", gt=0)
+    incident_claim_renew_seconds: int = Field(default=30, alias="INCIDENT_CLAIM_RENEW_SECONDS", gt=0)
     enable_sqs_consumer: bool = Field(default=True, alias="ENABLE_SQS_CONSUMER")
     langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
     langsmith_api_key_secret_id: str = Field(default="", alias="LANGSMITH_API_KEY_SECRET_ID")
@@ -41,6 +43,12 @@ class Settings(BaseSettings):
     langsmith_workspace_id: str = Field(default="", alias="LANGSMITH_WORKSPACE_ID")
 
     model_config = SettingsConfigDict(extra="ignore", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def validate_claim_timing(self) -> Settings:
+        if self.incident_claim_renew_seconds >= self.incident_claim_lease_seconds:
+            raise ValueError("INCIDENT_CLAIM_RENEW_SECONDS must be less than INCIDENT_CLAIM_LEASE_SECONDS")
+        return self
 
 
 @lru_cache(maxsize=1)

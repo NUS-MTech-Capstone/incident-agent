@@ -8,6 +8,8 @@ COPY pyproject.toml uv.lock ./
 COPY src ./src
 COPY api ./api
 COPY prompts ./prompts
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 RUN uv sync --frozen --no-dev --no-editable
 RUN /app/.venv/bin/python -c "import incident_agent.main; assert callable(incident_agent.main.create_runtime_app)"
 

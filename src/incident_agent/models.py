@@ -32,6 +32,7 @@ class IncidentEventType(StrEnum):
     ALERT_RECEIVED = "AlertReceived"
     ALERT_GROUPED = "AlertGrouped"
     INCIDENT_CREATED = "IncidentCreated"
+    INCIDENT_PROCESSING_RECLAIMED = "IncidentProcessingReclaimed"
     AGENT_TRIAGED = "AgentTriaged"
     EVIDENCE_COLLECTED = "EvidenceCollected"
     PLAN_PROPOSED = "PlanProposed"

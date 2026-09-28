@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import boto3
 import uvicorn
@@ -51,6 +52,8 @@ def build_service() -> IncidentService:
         ddm,
         settings.operation_timeout_seconds,
         settings.max_operation_output_bytes,
+        claim_lease=timedelta(seconds=settings.incident_claim_lease_seconds),
+        claim_renew_seconds=settings.incident_claim_renew_seconds,
     )
 
 
@@ -101,6 +104,7 @@ def create_runtime_app() -> FastAPI:
             settings.aws_region,
             settings.sqs_poll_wait_seconds,
             settings.sqs_visibility_timeout_seconds,
+            busy_retry_seconds=settings.incident_claim_renew_seconds,
         )
 
         @app.on_event("startup")

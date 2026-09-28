@@ -33,6 +33,9 @@ dev = [
   "ruff>=0.12.0",
 ]
 
+[tool.uv]
+constraint-dependencies = ["anyio>=4.14.2"]
+
 [project.scripts]
 incident-agent = "incident_agent.main:main"
 

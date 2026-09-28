@@ -50,6 +50,8 @@ OPERATION_TIMEOUT_SECONDS=45
 MAX_OPERATION_OUTPUT_BYTES=262144
 SQS_POLL_WAIT_SECONDS=20
 SQS_VISIBILITY_TIMEOUT_SECONDS=600
+INCIDENT_CLAIM_LEASE_SECONDS=120
+INCIDENT_CLAIM_RENEW_SECONDS=30
 ENABLE_SQS_CONSUMER=true
 LANGSMITH_TRACING=false
 LANGSMITH_API_KEY_SECRET_ID=
@@ -195,6 +197,9 @@ Metrics use low-cardinality dimensions only (`Service=incident-agent` and
 `runId`, `hostId`, `operation`, `planHash`, `state`, `durationMs`, and
 `errorKind`; prompts, model responses, tokens, command bodies, diagnostic
 stdout/stderr, and terminal streams must not be logged.
+Claim lifecycle signals are `IncidentClaimContended`,
+`IncidentClaimReclaimed`, and `IncidentClaimLost`; SQS heartbeat failures emit
+`SQSVisibilityExtensionFailures` without adding high-cardinality dimensions.
 
 LangSmith can be enabled for local or staging prompt debugging with
 `LANGSMITH_TRACING=true`; the dev Kubernetes overlay wires the API key through
@@ -215,11 +220,28 @@ Raw SNS/SQS payloads are not retained.
 `PlanValidationFailed` timeline events are metadata-only and record validation
 failure class names, not raw model output or rejected command-like text.
 
-The `groupKey` suppresses duplicate active agent runs. A managed-server `ALARM`
-for the same active group links to the existing incident and records an
-`AlertGrouped` timeline event instead of starting another workflow. The alert
-row is still retained for operator visibility. Managed-server `OK` alerts
-recover matching active incidents and record recovery timeline metadata.
+The deterministic `groupKey` (`sourceType|hostId|alarmName`) suppresses duplicate
+active agent runs. Postgres atomically permits only one active incident per
+non-empty group key. A managed-server `ALARM` for the same active group links to
+the existing incident and records an `AlertGrouped` timeline event instead of
+starting another workflow. The alert row is still retained for operator
+visibility.
+
+Diagnosis ownership uses an opaque, renewable, per-process fenced lease. A
+same-source SQS redelivery is not acknowledged while another live owner holds
+the claim. After expiry, a worker can reclaim the incident, emit
+`IncidentProcessingReclaimed`, and restart read-only diagnosis from the
+beginning. Every diagnosis state write checks the new claim token, so an old
+worker cannot overwrite the replacement. The SQS consumer also extends message
+visibility while work is in progress. It receives one message at a time and,
+when another worker owns the claim, shortens that message's visibility to the
+configured claim-renew interval without acknowledging it. Managed-server `OK`
+alerts clear any diagnosis claim, recover matching active incidents, and
+record recovery timeline metadata.
+
+This ownership path intentionally does not use a vector store. Embedding
+similarity is not a concurrency primitive and cross-incident model memory is
+outside the current bounded-agent scope.
 
 Alert statuses:
 
@@ -295,6 +317,31 @@ uv run mypy
 uv run bandit -r src -q
 uv run pip-audit
 ```
+
+Run the focused transactional claim test against a migrated disposable
+Postgres database:
+
+```bash
+INCIDENT_TEST_DATABASE_URL=postgresql://... make test-postgres
+```
+
+Production schema changes run through the `incident-agent-migrate` Argo CD
+PreSync job before the Deployment rolls out. The image contains Alembic and can
+also be migrated explicitly with either `DATABASE_URL` or
+`DATABASE_SECRET_ID` configured:
+
+```bash
+uv run python -m incident_agent.migrate
+```
+
+Application startup never creates or changes tables. The migration entrypoint
+upgrades versioned and empty databases normally. For the original unversioned
+production schema, it first requires the complete revision 0004 table, column,
+primary-key, and source-ID uniqueness signature; recreates only the known
+baseline indexes omitted by the legacy `create_all` path; stamps revision 0004;
+then upgrades and verifies revision 0005, the claim columns, and the partial
+unique active-group index. Unknown, incomplete, or partially upgraded schemas
+fail closed without logging database URLs, row values, or group keys.
 
 Run locally with a direct database URL and SQS disabled:
 

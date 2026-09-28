@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import logging
 import time
+import uuid
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -27,7 +28,7 @@ from incident_agent.models import (
     TriageResult,
 )
 from incident_agent.observability import emit_metric, log_event
-from incident_agent.persistence.store import Conflict, Duplicate, IncidentStore, NotFound
+from incident_agent.persistence.store import ClaimDisposition, Conflict, Duplicate, IncidentStore, NotFound
 from incident_agent.planning.agents import RemediationExecutorAgent
 from incident_agent.planning.catalog import VERIFY_OPERATIONS
 from incident_agent.planning.workflow import IncidentWorkflow
@@ -35,6 +36,10 @@ from incident_agent.redact import text as redact_text
 
 logger = logging.getLogger(__name__)
 PLAN_APPROVAL_TTL = timedelta(minutes=30)
+
+
+class ClaimLost(RuntimeError):
+    pass
 
 
 class IncidentService:
@@ -46,6 +51,9 @@ class IncidentService:
         operation_timeout: float,
         max_operation_output: int,
         task_runner: Callable[[Coroutine[Any, Any, None]], None] | None = None,
+        claim_lease: timedelta = timedelta(seconds=120),
+        claim_renew_seconds: float = 30,
+        worker_instance_id: str = "",
     ):
         self.store = store
         self.workflow = workflow
@@ -53,79 +61,105 @@ class IncidentService:
         self.operation_timeout = operation_timeout
         self.max_operation_output = max_operation_output
         self.task_runner: Callable[[Coroutine[Any, Any, None]], None] = task_runner or _schedule_task
+        self.claim_lease = claim_lease
+        self.claim_renew_seconds = claim_renew_seconds
+        self.worker_instance_id = worker_instance_id or uuid.uuid4().hex
         self.remediation_executor_agent = RemediationExecutorAgent()
         self.queue_consumer_configured = False
         self.queue_consumer_running = False
         self.last_error_summary = ""
 
-    async def handle_alert(self, alert: Alert) -> None:
+    async def handle_alert(self, alert: Alert) -> ClaimDisposition:
         emit_metric("IncidentReceived", 1, hostId=alert.host_id)
         alert.reason = redact_text(alert.reason, 4096)
-        try:
-            managed_alert = self.store.create_alert(alert)
-        except Duplicate:
-            return
         self.last_error_summary = ""
         if alert.state == "OK":
+            try:
+                managed_alert = self.store.create_alert(alert)
+            except Duplicate:
+                return ClaimDisposition.ACK_EXISTING
             recovered = self.store.recover_by_alarm(alert.alarm_arn, alert.group_key)
             if recovered:
                 self.store.link_alert(managed_alert.id, recovered[0].id)
             self.store.set_alert_status(managed_alert.id, AlertStatus.RESOLVED)
-            for incident in recovered:
+            for recovered_incident in recovered:
                 self.store.create_event(
-                    incident.id,
+                    recovered_incident.id,
                     IncidentEventType.ALERT_RECEIVED,
                     alert_id=managed_alert.id,
                     message="CloudWatch alarm returned to OK.",
                 )
                 self.store.create_event(
-                    incident.id,
+                    recovered_incident.id,
                     IncidentEventType.INCIDENT_RECOVERED,
                     alert_id=managed_alert.id,
                     message="Incident recovered before remediation approval.",
                 )
-                if incident.run_id:
+                if recovered_incident.run_id:
                     try:
-                        token = await self.ddm.issue_token(incident.run_id, "verify", ["health_check"], "")
-                        await self.ddm.close_run(incident.run_id, token.capability_token)
+                        token = await self.ddm.issue_token(recovered_incident.run_id, "verify", ["health_check"], "")
+                        await self.ddm.close_run(recovered_incident.run_id, token.capability_token)
                     except Exception as exc:  # noqa: BLE001 - close is best effort during recovery
                         logger.warning("incident run close after recovery failed: %s", exc)
-            return
-        active = self.store.find_active_incident_by_group(alert.group_key)
-        if active is not None:
-            self.store.mark_alert_grouped(managed_alert.id, active.id, _alert_status_for_incident(active.state))
+            return ClaimDisposition.ACK_EXISTING
+
+        claim = self.store.ingest_and_claim(alert, self.worker_instance_id, self.claim_lease)
+        managed_alert = claim.alert
+        incident = claim.incident
+        if claim.disposition == ClaimDisposition.RETRY_BUSY:
+            emit_metric("IncidentClaimContended", 1)
+            if incident is not None:
+                log_event(
+                    logger,
+                    "IncidentClaimContended",
+                    incidentId=incident.id,
+                    hostId=incident.host_id,
+                    state=incident.state.value,
+                )
+            return claim.disposition
+        if claim.disposition == ClaimDisposition.ACK_EXISTING:
+            return claim.disposition
+        if claim.disposition == ClaimDisposition.GROUPED:
+            if incident is None:
+                raise RuntimeError("grouped alert has no incident")
             self.store.create_event(
-                active.id,
+                incident.id,
                 IncidentEventType.ALERT_RECEIVED,
                 alert_id=managed_alert.id,
                 message="Duplicate managed-server alert received.",
             )
             self.store.create_event(
-                active.id,
+                incident.id,
                 IncidentEventType.ALERT_GROUPED,
                 alert_id=managed_alert.id,
                 message="Alert grouped into existing active incident.",
                 metadata={"groupKey": alert.group_key},
             )
-            return
-        try:
-            self.store.set_alert_status(managed_alert.id, AlertStatus.TRIAGING)
-            incident = self.store.create(alert)
-        except Duplicate:
-            return
-        self.store.link_alert(managed_alert.id, incident.id)
-        self.store.create_event(
-            incident.id,
-            IncidentEventType.ALERT_RECEIVED,
-            alert_id=managed_alert.id,
-            message="Managed-server alert received.",
-        )
-        self.store.create_event(
-            incident.id,
-            IncidentEventType.INCIDENT_CREATED,
-            alert_id=managed_alert.id,
-            message="Incident created for managed-server alert.",
-        )
+            return claim.disposition
+        if incident is None or not claim.claim_token:
+            raise RuntimeError("processable alert has no fenced incident claim")
+        if claim.created_incident:
+            self.store.create_event(
+                incident.id,
+                IncidentEventType.ALERT_RECEIVED,
+                alert_id=managed_alert.id,
+                message="Managed-server alert received.",
+            )
+            self.store.create_event(
+                incident.id,
+                IncidentEventType.INCIDENT_CREATED,
+                alert_id=managed_alert.id,
+                message="Incident created for managed-server alert.",
+            )
+        elif claim.reclaimed:
+            self.store.create_event(
+                incident.id,
+                IncidentEventType.INCIDENT_PROCESSING_RECLAIMED,
+                alert_id=managed_alert.id,
+                message="Expired incident processing claim was safely reclaimed.",
+                metadata={"processingAttempt": self.store.processing_attempt(incident.id)},
+            )
+            emit_metric("IncidentClaimReclaimed", 1)
         log_event(
             logger,
             "IncidentReceived",
@@ -134,7 +168,7 @@ class IncidentService:
             state=incident.state.value,
         )
         try:
-            result = await self.workflow.diagnose(incident)
+            result = await self._diagnose_with_claim(incident, claim.claim_token)
             updated_incident = result["incident"]
             plan = Plan.model_validate(result["plan"])
             triage = TriageResult.model_validate(result["triage"]) if result.get("triage") else None
@@ -150,6 +184,7 @@ class IncidentService:
                 triage,
                 plan_expires_at,
                 explanation,
+                claim.claim_token,
             )
             self.store.create_event(
                 incident.id,
@@ -182,11 +217,23 @@ class IncidentService:
             )
             if not plan.actions and updated_incident.run_id:
                 await self.ddm.close_run(updated_incident.run_id, await self._best_effort_close_token(updated_incident))
+            return ClaimDisposition.PROCESS
+        except ClaimLost:
+            emit_metric("IncidentClaimLost", 1)
+            log_event(
+                logger,
+                "IncidentClaimLost",
+                incidentId=incident.id,
+                hostId=incident.host_id,
+                state=IncidentState.DIAGNOSING.value,
+            )
+            await self._close_abandoned_diagnosis(incident)
+            return ClaimDisposition.RETRY_BUSY
         except Exception as exc:  # noqa: BLE001 - execution failures are persisted as incident state
             try:
                 current = self.store.get(incident.id)
                 if current.state != IncidentState.RECOVERED:
-                    self.store.set_failure(incident.id, redact_text(str(exc), 2048))
+                    self.store.set_failure(incident.id, redact_text(str(exc), 2048), claim.claim_token)
                     self.store.set_alert_status(managed_alert.id, AlertStatus.FAILED, redact_text(str(exc), 2048))
                     if isinstance(exc, ValueError):
                         self.store.create_event(
@@ -207,6 +254,43 @@ class IncidentService:
                 pass
             self.record_processing_error(str(exc))
             raise
+
+    async def _diagnose_with_claim(self, incident: Incident, claim_token: str) -> dict[str, Any]:
+        diagnosis = asyncio.create_task(self.workflow.diagnose(incident))
+        renewal = asyncio.create_task(self._renew_claim(incident.id, claim_token))
+        try:
+            done, _ = await asyncio.wait({diagnosis, renewal}, return_when=asyncio.FIRST_COMPLETED)
+            if renewal in done:
+                await renewal
+                raise ClaimLost("incident processing claim renewal stopped unexpectedly")
+            return dict(await diagnosis)
+        finally:
+            renewal.cancel()
+            await asyncio.gather(renewal, return_exceptions=True)
+            if not diagnosis.done():
+                diagnosis.cancel()
+                await asyncio.gather(diagnosis, return_exceptions=True)
+
+    async def _renew_claim(self, incident_id: str, claim_token: str) -> None:
+        while True:
+            await asyncio.sleep(self.claim_renew_seconds)
+            renewed = await asyncio.to_thread(
+                self.store.renew_claim,
+                incident_id,
+                claim_token,
+                self.claim_lease,
+            )
+            if not renewed:
+                raise ClaimLost("incident processing claim was lost")
+
+    async def _close_abandoned_diagnosis(self, incident: Incident) -> None:
+        if not incident.run_id:
+            return
+        try:
+            token = await self.ddm.issue_token(incident.run_id, "verify", ["health_check"], "")
+            await self.ddm.close_run(incident.run_id, token.capability_token)
+        except Exception as exc:  # noqa: BLE001 - run TTL is the fallback cleanup path
+            logger.warning("abandoned diagnosis run close failed: %s", type(exc).__name__)
 
     def list(self) -> list[Incident]:
         return self.store.list(100)
