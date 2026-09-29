@@ -23,7 +23,10 @@ class WorkloadIdentityClient:
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             response = await client.post(
                 f"{self.sts_url}/workloads/validate",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "x-api-version": "1",
+                },
             )
             response.raise_for_status()
         payload = response.json()
