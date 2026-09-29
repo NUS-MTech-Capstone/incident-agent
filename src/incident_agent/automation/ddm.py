@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TypeVar
 
 import httpx
+import httpx2
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
 
 from incident_agent.models import OperationResult, Run
 from incident_agent.observability import emit_metric
@@ -24,8 +28,10 @@ class DDMClient:
         workload_token_file: str,
         timeout: float = 10.0,
         transient_retry_attempts: int = 2,
+        tool_gateway_url: str = "http://localhost:8094/mcp",
     ):
         self.control_plane_url = control_plane_url.rstrip("/")
+        self.tool_gateway_url = tool_gateway_url
         self.workload_token_file = Path(workload_token_file)
         self.timeout = timeout
         self.transient_retry_attempts = max(1, transient_retry_attempts)
@@ -41,19 +47,15 @@ class DDMClient:
             },
         )
 
-    async def issue_token(self, run_id: str, phase: str, operations: list[str], plan_hash: str = "") -> Run:
-        return await self._control_request(
-            f"/automation/runs/{run_id}/token",
-            {"phase": phase, "allowedOperations": operations, "planHash": plan_hash},
-        )
+    async def close_run(self, run_id: str) -> None:
+        token = self._workload_token()
 
-    async def close_run(self, run_id: str, capability_token: str) -> None:
         async def call() -> None:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
                     f"{self.control_plane_url}/automation/runs/{run_id}/close",
                     headers={
-                        "Authorization": f"Bearer {capability_token}",
+                        "Authorization": f"Bearer {token}",
                         API_VERSION_HEADER: SUPPORTED_API_VERSION,
                     },
                     json={},
@@ -64,31 +66,33 @@ class DDMClient:
 
     async def execute(
         self,
-        operations_url: str,
         run_id: str,
-        capability_token: str,
         operation_id: str,
         plan_hash: str = "",
     ) -> OperationResult:
-        async def call() -> OperationResult:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{operations_url.rstrip('/')}/automation/runs/{run_id}/operations",
-                    headers={
-                        "Authorization": f"Bearer {capability_token}",
-                        API_VERSION_HEADER: SUPPORTED_API_VERSION,
-                    },
-                    json={"operationId": operation_id, "planHash": plan_hash},
-                )
-                response.raise_for_status()
-                return OperationResult.model_validate(response.json())
-
-        return await self._with_retry(operation_id, call)
+        arguments: dict[str, str] = {"runId": run_id}
+        if plan_hash:
+            arguments["planHash"] = plan_hash
+        async with httpx2.AsyncClient(
+            headers={"Authorization": f"Bearer {self._workload_token()}"},
+            timeout=self.timeout,
+        ) as http_client:
+            transport = streamable_http_client(self.tool_gateway_url, http_client=http_client)
+            async with Client(transport, read_timeout_seconds=self.timeout) as client:
+                await client.list_tools()
+                response = await client.call_tool(operation_id, arguments)
+        if response.is_error:
+            raise RuntimeError("tool gateway denied or failed the operation")
+        if response.structured_content:
+            return OperationResult.model_validate(response.structured_content)
+        for content in response.content:
+            text = getattr(content, "text", "")
+            if text:
+                return OperationResult.model_validate(json.loads(text))
+        raise RuntimeError("tool gateway returned no operation result")
 
     async def _control_request(self, path: str, payload: dict[str, object]) -> Run:
-        token = self.workload_token_file.read_text(encoding="utf-8").strip()
-        if not token:
-            raise RuntimeError("projected workload token is empty")
+        token = self._workload_token()
 
         async def call() -> Run:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -105,6 +109,12 @@ class DDMClient:
 
         operation = str(payload.get("phase") or path.rsplit("/", 1)[-1])
         return await self._with_retry(operation, call)
+
+    def _workload_token(self) -> str:
+        token = self.workload_token_file.read_text(encoding="utf-8").strip()
+        if not token:
+            raise RuntimeError("projected workload token is empty")
+        return token
 
     async def _with_retry(self, operation: str, call: Callable[[], Awaitable[T]]) -> T:
         last_error: Exception | None = None

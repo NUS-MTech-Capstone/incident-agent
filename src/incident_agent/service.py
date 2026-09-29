@@ -97,8 +97,7 @@ class IncidentService:
                 )
                 if recovered_incident.run_id:
                     try:
-                        token = await self.ddm.issue_token(recovered_incident.run_id, "verify", ["health_check"], "")
-                        await self.ddm.close_run(recovered_incident.run_id, token.capability_token)
+                        await self.ddm.close_run(recovered_incident.run_id)
                     except Exception as exc:  # noqa: BLE001 - close is best effort during recovery
                         logger.warning("incident run close after recovery failed: %s", exc)
             return ClaimDisposition.ACK_EXISTING
@@ -216,7 +215,7 @@ class IncidentService:
                 incident_id=incident.id,
             )
             if not plan.actions and updated_incident.run_id:
-                await self.ddm.close_run(updated_incident.run_id, await self._best_effort_close_token(updated_incident))
+                await self.ddm.close_run(updated_incident.run_id)
             return ClaimDisposition.PROCESS
         except ClaimLost:
             emit_metric("IncidentClaimLost", 1)
@@ -287,8 +286,7 @@ class IncidentService:
         if not incident.run_id:
             return
         try:
-            token = await self.ddm.issue_token(incident.run_id, "verify", ["health_check"], "")
-            await self.ddm.close_run(incident.run_id, token.capability_token)
+            await self.ddm.close_run(incident.run_id)
         except Exception as exc:  # noqa: BLE001 - run TTL is the fallback cleanup path
             logger.warning("abandoned diagnosis run close failed: %s", type(exc).__name__)
 
@@ -450,35 +448,16 @@ class IncidentService:
             )
             self.remediation_executor_agent.validate(incident, approved_plan_hash)
             remediation_operation = incident.plan.actions[0].operation_id
-            token = await self.ddm.issue_token(
-                incident.run_id,
-                "remediate",
-                [remediation_operation],
-                incident.plan_hash,
-            )
-            remediation = await self.ddm.execute(
-                incident.operations_url,
-                incident.run_id,
-                token.capability_token,
-                remediation_operation,
-                incident.plan_hash,
-            )
+            remediation = await self.ddm.execute(incident.run_id, remediation_operation, incident.plan_hash)
             if remediation.exit_code != 0:
                 raise RuntimeError(
                     f"{remediation_operation} failed with exit code {remediation.exit_code}: {remediation.stderr}"
                 )
-            verify_token = await self.ddm.issue_token(incident.run_id, "verify", VERIFY_OPERATIONS, "")
             verification = []
             success = True
             for operation in VERIFY_OPERATIONS:
                 try:
-                    result = await self.ddm.execute(
-                        incident.operations_url,
-                        incident.run_id,
-                        verify_token.capability_token,
-                        operation,
-                        "",
-                    )
+                    result = await self.ddm.execute(incident.run_id, operation, incident.plan_hash)
                 except Exception as exc:  # noqa: BLE001 - verification failures become report data
                     result = OperationResult(operationId=operation, stderr=str(exc), exitCode=-1)
                 result.stdout = redact_text(result.stdout, self.max_operation_output)
@@ -512,7 +491,7 @@ class IncidentService:
                 message="Post-remediation verification passed." if success else "Post-remediation verification failed.",
                 metadata={"operationCount": len(verification)},
             )
-            await self.ddm.close_run(incident.run_id, verify_token.capability_token)
+            await self.ddm.close_run(incident.run_id)
             duration_ms = (time.monotonic() - started) * 1000
             if success:
                 emit_metric(
@@ -610,14 +589,9 @@ class IncidentService:
             reason,
         )
 
-    async def _best_effort_close_token(self, incident: Incident) -> str:
-        token = await self.ddm.issue_token(incident.run_id, "verify", ["health_check"], "")
-        return token.capability_token
-
     async def _close_after_reject(self, incident: Incident) -> None:
         try:
-            token = await self.ddm.issue_token(incident.run_id, "verify", ["health_check"], "")
-            await self.ddm.close_run(incident.run_id, token.capability_token)
+            await self.ddm.close_run(incident.run_id)
         except Exception as exc:  # noqa: BLE001 - reject close is best effort
             logger.warning("incident run close after rejection failed: %s", exc)
 

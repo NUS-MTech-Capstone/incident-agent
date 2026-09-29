@@ -12,7 +12,7 @@ from incident_agent.models import (
     Plan,
     TriageResult,
 )
-from incident_agent.planning.catalog import DIAGNOSTIC_OPERATIONS
+from incident_agent.planning.catalog import select_diagnostic_operations
 from incident_agent.planning.planner import Planner
 from incident_agent.planning.supervisor import plan_hash, validate_execution, validate_plan
 from incident_agent.redact import text as redact_text
@@ -26,9 +26,13 @@ REMEDIATION_EXECUTOR_AGENT = "Remediation Executor Agent"
 
 
 def agent_definitions(planner_type: str) -> list[ExplanationAgent]:
+    uses_a2a = planner_type.startswith("a2a_")
     uses_bedrock = planner_type.startswith("bedrock")
     uses_openai = planner_type.startswith("openai")
-    if uses_bedrock:
+    if uses_a2a:
+        model_reasoning = "Bedrock LLM structured reasoning over authenticated A2A with deterministic fallback"
+        planner_tool = "Incident Reasoning Agent over A2A"
+    elif uses_bedrock:
         model_reasoning = "Bedrock LLM structured reasoning"
         planner_tool = "Bedrock via LangChain"
     elif uses_openai:
@@ -71,7 +75,7 @@ def agent_definitions(planner_type: str) -> list[ExplanationAgent]:
             memory="incident-local prompt context only; no cross-incident memory",
             tools=[planner_tool],
             inputs=["alarm name", "host ID", "sanitized alarm reason"],
-            outputs=["TriageResult"],
+            outputs=["TriageResult", "suggested diagnostic operation IDs"],
             handoffTo=EVIDENCE_COLLECTOR_AGENT,
         ),
         ExplanationAgent(
@@ -84,7 +88,7 @@ def agent_definitions(planner_type: str) -> list[ExplanationAgent]:
             ],
             reasoningType="deterministic policy",
             memory="incident-local operation results",
-            tools=["Agent Control Plane automation API", "STS capability tokens", "Proxy Dataplane operations API"],
+            tools=["MCP Tool Gateway", "Agent Control Plane automation API", "STS capability tokens"],
             inputs=["incident ID", "host ID", "diagnostic operation catalog"],
             outputs=["bounded OperationResult list"],
             handoffTo=ACTION_PLAN_AGENT,
@@ -129,7 +133,7 @@ def agent_definitions(planner_type: str) -> list[ExplanationAgent]:
             ],
             reasoningType="deterministic execution policy",
             memory="incident execution state and verification results",
-            tools=["Agent Control Plane automation API", "STS capability tokens", "Proxy Dataplane operations API"],
+            tools=["MCP Tool Gateway", "Agent Control Plane automation API", "STS capability tokens"],
             inputs=["approved incident", "approved plan hash"],
             outputs=["remediation result", "verification result", "post-incident report"],
             handoffTo="Post-incident audit and operator review",
@@ -150,13 +154,14 @@ class EvidenceCollectorAgent:
         self.ddm = ddm
         self.max_operation_output = max_operation_output
 
-    async def run(self, incident: Incident) -> EvidenceCollection:
-        run = await self.ddm.start_run(incident.id, incident.host_id, DIAGNOSTIC_OPERATIONS)
+    async def run(self, incident: Incident, suggested_operations: list[str]) -> EvidenceCollection:
+        operations = select_diagnostic_operations(suggested_operations)
+        run = await self.ddm.start_run(incident.id, incident.host_id, operations)
         incident.run_id = run.run_id
         incident.operations_url = run.operations_url
         evidence: list[OperationResult] = []
         decisions: list[ExplanationToolDecision] = []
-        for operation in DIAGNOSTIC_OPERATIONS:
+        for operation in operations:
             decisions.append(
                 ExplanationToolDecision(
                     operationId=operation,
@@ -166,7 +171,7 @@ class EvidenceCollectorAgent:
                 )
             )
             try:
-                result = await self.ddm.execute(run.operations_url, run.run_id, run.capability_token, operation, "")
+                result = await self.ddm.execute(run.run_id, operation)
             except Exception as exc:  # noqa: BLE001 - diagnostic failures are evidence
                 result = OperationResult(operationId=operation, stderr=str(exc), exitCode=-1)
             result.stdout = redact_text(result.stdout, self.max_operation_output)

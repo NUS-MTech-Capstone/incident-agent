@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 REQUEST_ID_HEADER = "X-Request-ID"
-SERVICE_NAME = "incident-agent"
+SERVICE_NAME = os.getenv("SERVICE_NAME", "incident-agent")
 
 _request_id: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="")
 _RESERVED_LOG_ATTRS = {

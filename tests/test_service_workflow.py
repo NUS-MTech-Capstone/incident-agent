@@ -23,7 +23,7 @@ from incident_agent.planning.agents import (
     REMEDIATION_EXECUTOR_AGENT,
     TRIAGE_AGENT,
 )
-from incident_agent.planning.catalog import DIAGNOSTIC_OPERATIONS
+from incident_agent.planning.catalog import REQUIRED_DIAGNOSTIC_OPERATIONS
 from incident_agent.planning.supervisor import plan_hash
 from tests.conftest import FakeDDM, StaticPlanner, alert, make_service
 
@@ -48,11 +48,11 @@ async def test_full_workflow_no_action_completes_and_closes(
     assert managed_alert.incident_id == incident.id
     assert incident.plan.actions == []
     assert ddm.started
-    assert "target_probe" in ddm.started[0][2]
-    assert "target_probe" in [item.operation_id for item in incident.evidence]
+    assert ddm.started[0][2] == REQUIRED_DIAGNOSTIC_OPERATIONS
+    assert [item.operation_id for item in incident.evidence] == REQUIRED_DIAGNOSTIC_OPERATIONS
     assert incident.explanation.model.planner_type == "rule_based"
     assert incident.explanation.workflow.catalog_version == "v1"
-    assert incident.explanation.workflow.diagnostic_operations == DIAGNOSTIC_OPERATIONS
+    assert incident.explanation.workflow.diagnostic_operations == REQUIRED_DIAGNOSTIC_OPERATIONS
     assert [agent.name for agent in incident.explanation.agents] == [
         INCIDENT_MANAGER_AGENT,
         TRIAGE_AGENT,
@@ -64,7 +64,7 @@ async def test_full_workflow_no_action_completes_and_closes(
     assert all(agent.purpose and agent.reasoning_type and agent.memory for agent in incident.explanation.agents)
     assert any(agent.tools for agent in incident.explanation.agents)
     assert any(
-        decision.operation_id == "target_probe" and decision.chosen_by == "policy"
+        decision.operation_id == "service_status" and decision.chosen_by == "policy"
         for decision in incident.explanation.tool_decisions
     )
     explanation_json = incident.explanation.model_dump_json()
@@ -128,7 +128,7 @@ async def test_full_workflow_restart_approval_execution(
     assert IncidentEventType.REMEDIATION_STARTED in event_types
     assert IncidentEventType.VERIFICATION_PASSED in event_types
     assert ("restart_service", incident.plan_hash) in ddm.executed
-    assert ddm.closed[-1] == ("run-1", "verify-token")
+    assert ddm.closed[-1] == "run-1"
     metrics = capsys.readouterr().out
     assert "PlanApproved" in metrics
     assert "RemediationExecuted" in metrics
@@ -155,7 +155,6 @@ async def test_execution_scopes_token_to_approved_catalog_operation(store: Incid
     service.approve(incident.id, incident.plan_hash, "user-1")
     await service.execute(incident.id, incident.plan_hash)
 
-    assert ("run-1", "remediate", ["recover_demo_app"], incident.plan_hash) in ddm.tokens
     assert ("recover_demo_app", incident.plan_hash) in ddm.executed
     assert store.get(incident.id).post_incident_report.action_taken == "recover_demo_app exit=0"
 

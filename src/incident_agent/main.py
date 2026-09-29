@@ -2,21 +2,29 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from typing import Any
 
 import boto3
 import uvicorn
 from fastapi import FastAPI
 
+from incident_agent.a2a_runtime import create_reasoning_app
 from incident_agent.api.web import create_app
 from incident_agent.automation.ddm import DDMClient
 from incident_agent.config import Settings, load_settings
+from incident_agent.identity import WorkloadIdentityClient
 from incident_agent.ingest.sqs import SQSConsumer
 from incident_agent.langsmith import configure_langsmith
 from incident_agent.observability import configure_logging
 from incident_agent.persistence.store import IncidentStore
+from incident_agent.planning.a2a_client import A2APlanner
 from incident_agent.planning.planner import BedrockPlanner, FallbackPlanner, OpenAIPlanner, RuleBasedPlanner
 from incident_agent.planning.workflow import IncidentWorkflow
 from incident_agent.service import IncidentService
+from incident_agent.tool_gateway import GatewayBackend, GatewayPolicy, create_tool_gateway_app
+
+ALLOWED_BEDROCK_MODEL_IDS = {"global.amazon.nova-2-lite-v1:0"}
+ALLOWED_OPENAI_MODEL_IDS = {"gpt-5.5"}
 
 
 def _database_url_from_secret(secret_id: str, region_name: str) -> str:
@@ -29,7 +37,6 @@ def _database_url_from_secret(secret_id: str, region_name: str) -> str:
 
 def build_service() -> IncidentService:
     settings = load_settings()
-    configure_langsmith(settings)
     database_url = settings.database_url or _database_url_from_secret(
         settings.database_secret_id,
         settings.aws_region,
@@ -43,8 +50,17 @@ def build_service() -> IncidentService:
         settings.workload_token_file,
         settings.http_timeout_seconds,
         settings.transient_retry_attempts,
+        tool_gateway_url=settings.tool_gateway_url,
     )
-    planner = _build_planner(settings)
+    planner = A2APlanner(
+        settings.reasoning_agent_url,
+        settings.workload_token_file,
+        RuleBasedPlanner(),
+        settings.http_timeout_seconds,
+        settings.transient_retry_attempts,
+        settings.bedrock_model_id,
+        settings.bedrock_region or settings.aws_region,
+    )
     workflow = IncidentWorkflow(planner, ddm, settings.operation_timeout_seconds, settings.max_operation_output_bytes)
     return IncidentService(
         store,
@@ -64,6 +80,8 @@ def _build_planner(settings: Settings) -> BedrockPlanner | FallbackPlanner | Ope
     if mode in {"openai", "openai_with_fallback"}:
         if not settings.openai_api_key.strip():
             raise RuntimeError("OPENAI_API_KEY is required when PLANNER_MODE uses OpenAI")
+        if settings.openai_model not in ALLOWED_OPENAI_MODEL_IDS:
+            raise RuntimeError("OPENAI_MODEL is not in the reviewed model allowlist")
         openai_planner = OpenAIPlanner(
             settings.openai_api_key,
             settings.openai_model,
@@ -75,6 +93,8 @@ def _build_planner(settings: Settings) -> BedrockPlanner | FallbackPlanner | Ope
         if mode == "openai":
             return openai_planner
         return FallbackPlanner(openai_planner, RuleBasedPlanner())
+    if settings.bedrock_model_id not in ALLOWED_BEDROCK_MODEL_IDS:
+        raise RuntimeError("BEDROCK_MODEL_ID is not in the reviewed model allowlist")
     bedrock_planner = BedrockPlanner(
         settings.bedrock_model_id,
         settings.bedrock_max_prompt_bytes,
@@ -120,9 +140,48 @@ def create_runtime_app() -> FastAPI:
     return app
 
 
+def create_reasoning_runtime_app() -> FastAPI:
+    settings = load_settings()
+    configure_logging(settings.log_format)
+    configure_langsmith(settings)
+    planner = _build_planner(settings)
+    return create_reasoning_app(
+        planner,
+        WorkloadIdentityClient(settings.sts_url, settings.http_timeout_seconds),
+        settings.reasoning_agent_url,
+    )
+
+
+def create_tool_gateway_runtime_app() -> Any:
+    settings = load_settings()
+    configure_logging(settings.log_format)
+    policy = GatewayPolicy.load(settings.tool_policy_file)
+    return create_tool_gateway_app(
+        policy,
+        GatewayBackend(
+            settings.agent_controlplane_url or settings.proxy_controlplane_url,
+            settings.workload_token_file,
+            settings.http_timeout_seconds,
+            settings.max_operation_output_bytes,
+        ),
+        WorkloadIdentityClient(settings.sts_url, settings.http_timeout_seconds),
+    )
+
+
+def create_component_app() -> Any:
+    component = load_settings().component.strip().lower()
+    if component == "coordinator":
+        return create_runtime_app()
+    if component == "reasoning":
+        return create_reasoning_runtime_app()
+    if component == "tool_gateway":
+        return create_tool_gateway_runtime_app()
+    raise RuntimeError("INCIDENT_AGENT_COMPONENT must be coordinator, reasoning, or tool_gateway")
+
+
 def main() -> None:
     settings = load_settings()
-    uvicorn.run("incident_agent.main:create_runtime_app", host="0.0.0.0", port=settings.port, factory=True)  # nosec B104 # noqa: S104
+    uvicorn.run("incident_agent.main:create_component_app", host="0.0.0.0", port=settings.port, factory=True)  # nosec B104 # noqa: S104
 
 
 if __name__ == "__main__":

@@ -272,6 +272,7 @@ class RuleBasedPlanner:
             category="availability",
             summary=f"{incident.alarm_name} on {incident.host_id}",
             rationale="Deterministic fallback triage based on alarm reason.",
+            suggestedDiagnosticOperationIds=["system_overview", "disk_usage", "memory_usage"],
         )
 
     async def plan(self, incident: Incident, evidence: list[OperationResult]) -> Plan:

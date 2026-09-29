@@ -85,6 +85,9 @@ class TriageResult(BaseModel):
     category: str
     summary: str
     rationale: str
+    suggested_diagnostic_operation_ids: list[str] = Field(alias="suggestedDiagnosticOperationIds", default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
 
     @field_validator("category", "summary", "rationale")
     @classmethod
@@ -147,6 +150,7 @@ class ExplanationWorkflow(BaseModel):
     verification_operations: list[str] = Field(alias="verificationOperations", default_factory=list)
     run_id: str = Field(alias="runId", default="")
     plan_hash: str = Field(alias="planHash", default="")
+    a2a_handoffs: list[dict[str, Any]] = Field(alias="a2aHandoffs", default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
 

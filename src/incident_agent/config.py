@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    component: str = Field(default="coordinator", alias="INCIDENT_AGENT_COMPONENT")
     port: int = Field(default=8091, alias="PORT")
     log_format: str = Field(default="text", alias="LOG_FORMAT")
     aws_region: str = Field(default="ap-southeast-1", alias="AWS_REGION")
@@ -14,6 +15,11 @@ class Settings(BaseSettings):
     database_url: str = Field(default="", alias="DATABASE_URL")
     database_secret_id: str = Field(default="", alias="DATABASE_SECRET_ID")
     agent_controlplane_url: str = Field(default="", alias="AGENT_CONTROLPLANE_URL")
+    reasoning_agent_url: str = Field(default="http://localhost:8093", alias="REASONING_AGENT_URL")
+    tool_gateway_url: str = Field(default="http://localhost:8094/mcp", alias="TOOL_GATEWAY_URL")
+    sts_url: str = Field(default="http://localhost:8082", alias="STS_URL")
+    tool_policy_file: str = Field(default="", alias="TOOL_POLICY_FILE")
+    service_name: str = Field(default="incident-agent", alias="SERVICE_NAME")
     proxy_controlplane_url: str = Field(default="http://localhost:8080", alias="PROXY_CONTROLPLANE_URL")
     workload_token_file: str = Field(
         default="/var/run/secrets/tokens/incident-agent-token",

@@ -8,10 +8,10 @@ bounded: the model can classify, summarize evidence, and propose a structured
 plan, but authority to mutate infrastructure or target hosts remains outside
 the model and behind explicit validation plus human approval.
 
-The service consumes managed-server CloudWatch alarm notifications from SQS,
-gathers bounded diagnostics through the existing DenDenMushi automation path,
-asks the configured LLM provider for structured triage and plan output, and
-stores sanitized alert and incident metadata in Postgres. The Go
+The coordinator consumes managed-server CloudWatch alarm notifications from
+SQS, delegates structured triage and planning to a private Reasoning Agent over
+A2A, gathers bounded diagnostics through a private MCP Tool Gateway, and stores
+sanitized alert and incident metadata in Postgres. The Go
 `agent-controlplane` exposes Cognito-protected approval pages plus JSON
 endpoints for the Angular Agentic AI UI.
 
@@ -26,6 +26,8 @@ proxies interactive terminal streams.
 
 ```text
 PORT=8091
+INCIDENT_AGENT_COMPONENT=coordinator
+SERVICE_NAME=incident-agent
 LOG_FORMAT=json
 AWS_REGION=ap-southeast-1
 ENVIRONMENT=dev
@@ -34,6 +36,10 @@ INCIDENT_QUEUE_URL=
 DATABASE_URL=
 DATABASE_SECRET_ID=
 AGENT_CONTROLPLANE_URL=http://agent-controlplane:8092
+REASONING_AGENT_URL=http://incident-reasoning-agent:8093
+TOOL_GATEWAY_URL=http://agent-tool-gateway:8094/mcp
+STS_URL=http://sts:8082
+TOOL_POLICY_FILE=
 PROXY_CONTROLPLANE_URL=http://proxy-controlplane:8080
 WORKLOAD_TOKEN_FILE=/var/run/secrets/tokens/incident-agent-token
 PLANNER_MODE=bedrock_with_fallback
@@ -65,7 +71,7 @@ LANGSMITH_WORKSPACE_ID=
 `postgresql+psycopg://` URLs, normalizing them to the bundled `psycopg` driver
 before opening the SQLAlchemy engine.
 
-When `LANGSMITH_TRACING=true`, the service reads `LANGSMITH_API_KEY` from the
+When `LANGSMITH_TRACING=true`, the Reasoning Agent reads `LANGSMITH_API_KEY` from the
 environment or fetches it from `LANGSMITH_API_KEY_SECRET_ID` in AWS Secrets
 Manager before constructing the LangChain Bedrock client. If no key is
 available, tracing is disabled and the worker continues so incident processing
@@ -87,23 +93,12 @@ Bedrock after the account quota request is approved:
 - `openai`: OpenAI Responses API only.
 - `rule_based`: deterministic triage and planning, no LLM calls.
 
-If using the OpenAI planner mode in EKS, create the OpenAI key as a Kubernetes
-Secret before rolling out the deployment:
-
-```bash
-read -rsp "OpenAI API key: " OPENAI_API_KEY
-echo
-kubectl create secret generic incident-agent-openai \
-  -n dendenmushi \
-  --from-literal=openai-api-key="${OPENAI_API_KEY}"
-unset OPENAI_API_KEY
-```
-
-The deployment maps that secret key to `OPENAI_API_KEY`. Do not put the API key
-in this README, Kustomize overlays, Terraform variables, shell history, or
-committed manifests. The OpenAI quickstart documents `OPENAI_API_KEY` as the
-standard environment variable used by OpenAI clients, and the incident agent
-uses the Responses API bearer-auth path.
+Provider modes and model IDs are code allowlisted before a provider client is
+constructed. The deployed Reasoning Agent is fixed to Bedrock and the reviewed
+Nova 2 Lite model. OpenAI modes remain available only for explicit local
+experiments and are not wired into the production Kubernetes deployment. Never
+put an API key in this README, Kustomize overlays, Terraform variables, shell
+history, or committed manifests.
 
 `BEDROCK_REGION` overrides only the Bedrock runtime client region. Leave
 `AWS_REGION` set to the deployment region for SQS, Secrets Manager, and other
@@ -136,21 +131,30 @@ transitions land in the central incident queue.
 ```text
 SQS alert
 -> Incident Manager Agent
--> Triage Agent
--> Evidence Collector Agent using DDM automation operations
--> Action Plan Agent using structured LLM or rule-based output
+-> Reasoning Agent over A2A for structured triage
+-> Evidence Collector Agent through the MCP Tool Gateway
+-> Reasoning Agent over A2A for a structured single-action candidate plan
 -> Action Plan Reviewer Agent with deterministic guardrails and plan hash
 -> await human approval
--> Remediation Executor Agent for the single approved v1 remediation operation
+-> Agent Control Plane through the MCP Tool Gateway for the approved operation
 -> verify service_status and health_check
 -> close automation run
 ```
 
-The agents are named runtime roles inside this worker service, not independent
-autonomous services. This gives the capstone report a clear multi-agent design
-while preserving the existing authority boundary: the model proposes, the
-reviewer validates, Manager/Admin users approve, and scoped STS tokens authorize
-runtime execution.
+The coordinator and Reasoning Agent are separate private workloads using the
+official A2A Python SDK. Authenticated `GET /.well-known/agent-card.json` advertises one
+`analyze_incident` skill and `POST /` accepts A2A JSON-RPC for the `triage` and
+`plan` stages. A2A task state is disposable; Postgres remains authoritative.
+The Reasoning Agent has no database, SQS, Kubernetes, or operation permissions.
+
+The Tool Gateway is an official Streamable HTTP MCP server at `/mcp`. It
+filters `tools/list` by projected workload identity and accepts only `runId`
+plus `planHash` where required. The GitOps policy defaults to deny. The
+coordinator can discover diagnostics; Agent Control Plane can discover the
+reviewed remediation catalog and fixed verification tools; the Reasoning Agent
+has no tools. Commands, addresses, credentials, URLs, and arbitrary arguments
+are never accepted. The model proposes, deterministic code reviews,
+Manager/Admin users approve, and fresh STS capabilities authorize execution.
 
 Allowed diagnostic operations:
 
@@ -192,8 +196,8 @@ when `LOG_FORMAT=json`, propagates `X-Request-ID` on HTTP requests, creates a
 correlation ID for each SQS message, and writes CloudWatch EMF metrics to
 stdout in `CLOUDWATCH_NAMESPACE`.
 
-Metrics use low-cardinality dimensions only (`Service=incident-agent` and
-`Environment`). Log fields are metadata such as `requestId`, `incidentId`,
+Metrics use low-cardinality dimensions only (`Service` is the active component
+name and `Environment` identifies the environment). Log fields are metadata such as `requestId`, `incidentId`,
 `runId`, `hostId`, `operation`, `planHash`, `state`, `durationMs`, and
 `errorKind`; prompts, model responses, tokens, command bodies, diagnostic
 stdout/stderr, and terminal streams must not be logged.
@@ -202,8 +206,8 @@ Claim lifecycle signals are `IncidentClaimContended`,
 `SQSVisibilityExtensionFailures` without adding high-cardinality dimensions.
 
 LangSmith can be enabled for local or staging prompt debugging with
-`LANGSMITH_TRACING=true`; the dev Kubernetes overlay wires the API key through
-AWS Secrets Manager. Production keeps it disabled. Bedrock invocation logging
+`LANGSMITH_TRACING=true`; the dev Kubernetes overlay wires the API key only to
+the Reasoning Agent through AWS Secrets Manager. Production keeps it disabled. Bedrock invocation logging
 and OpenTelemetry/X-Ray tracing should also remain disabled by default because
 they can retain sensitive prompt or evidence data; enable them only for short,
 explicit debug windows.
@@ -252,9 +256,10 @@ RECEIVED -> TRIAGING -> FAILED
 PENDING_APPROVAL -> REJECTED
 ```
 
-`AGENT_CONTROLPLANE_URL` is used for bounded automation run start/token/close
-calls. `PROXY_CONTROLPLANE_URL` remains as a temporary local fallback during
-the extraction rollout.
+`AGENT_CONTROLPLANE_URL` is used for automation-run lifecycle and state-aware
+capability requests. Operation execution always uses `TOOL_GATEWAY_URL`.
+`PROXY_CONTROLPLANE_URL` remains only as a local compatibility fallback for the
+control-plane address and is not an operation path.
 
 ## Routes
 
@@ -264,6 +269,20 @@ GET  /readyz
 GET  /openapi.yaml
 GET  /internal/worker/health
 ```
+
+Private protocol routes use separate component processes from the same image:
+
+```http
+GET  /.well-known/agent-card.json  # Reasoning Agent, port 8093
+POST /                             # A2A JSON-RPC, port 8093
+POST /mcp                          # MCP Streamable HTTP, port 8094
+```
+
+Every A2A and MCP request carries a projected service-account token validated
+through STS TokenReview. Authentication, validation, policy, stale-state, and
+plan-hash failures fail closed. Only bounded transient A2A/provider failures
+fall back to the deterministic planner. Diagnostics and verification allow one
+transient transport retry; remediation is never retried automatically.
 
 Business endpoints require `x-api-version: 1`. `GET /healthz`, `GET /readyz`,
 and `GET /openapi.yaml` are exempt so probes and spec reads do not need custom
@@ -348,7 +367,7 @@ Run locally with a direct database URL and SQS disabled:
 ```bash
 DATABASE_URL=sqlite:///./incident-agent.db \
 ENABLE_SQS_CONSUMER=false \
-uv run uvicorn incident_agent.main:app --host 0.0.0.0 --port 8091
+uv run incident-agent
 ```
 
 ## Evaluation Baseline

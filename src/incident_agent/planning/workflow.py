@@ -14,6 +14,7 @@ from incident_agent.models import (
     Incident,
     IncidentExplanation,
     OperationResult,
+    TriageResult,
 )
 from incident_agent.observability import emit_metric, log_event
 from incident_agent.planning.agents import (
@@ -90,7 +91,8 @@ class IncidentWorkflow:
     async def _gather_evidence(self, state: WorkflowState) -> WorkflowState:
         incident = state["incident"]
         started = time.monotonic()
-        collected = await self.evidence_collector_agent.run(incident)
+        triage = TriageResult.model_validate(state["triage"])
+        collected = await self.evidence_collector_agent.run(incident, triage.suggested_diagnostic_operation_ids)
         duration_ms = (time.monotonic() - started) * 1000
         emit_metric(
             "EvidenceCollected",
@@ -110,6 +112,7 @@ class IncidentWorkflow:
         )
         explanation = _base_explanation(self.planner)
         explanation.workflow.run_id = collected.incident.run_id
+        explanation.workflow.diagnostic_operations = [decision.operation_id for decision in collected.decisions]
         explanation.tool_decisions.extend(collected.decisions)
         return {
             "incident": collected.incident,

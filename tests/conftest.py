@@ -18,9 +18,8 @@ class FakeDDM(DDMClient):
     def __init__(self, results: dict[str, OperationResult] | None = None):
         self.results = results or {}
         self.started: list[tuple[str, str, list[str]]] = []
-        self.tokens: list[tuple[str, str, list[str], str]] = []
         self.executed: list[tuple[str, str]] = []
-        self.closed: list[tuple[str, str]] = []
+        self.closed: list[str] = []
 
     async def start_run(self, incident_id: str, host_id: str, operations: list[str]) -> Run:
         self.started.append((incident_id, host_id, operations))
@@ -32,29 +31,17 @@ class FakeDDM(DDMClient):
             capabilityToken="diagnose-token",
         )
 
-    async def issue_token(self, run_id: str, phase: str, operations: list[str], plan_hash: str = "") -> Run:
-        self.tokens.append((run_id, phase, operations, plan_hash))
-        return Run(
-            runId=run_id,
-            incidentId="inc-1",
-            hostId="host-1",
-            operationsUrl="http://dataplane:8083",
-            capabilityToken=f"{phase}-token",
-        )
-
     async def execute(
         self,
-        operations_url: str,
         run_id: str,
-        capability_token: str,
         operation_id: str,
         plan_hash: str = "",
     ) -> OperationResult:
         self.executed.append((operation_id, plan_hash))
         return self.results.get(operation_id) or OperationResult(operationId=operation_id, stdout="ok", exitCode=0)
 
-    async def close_run(self, run_id: str, capability_token: str) -> None:
-        self.closed.append((run_id, capability_token))
+    async def close_run(self, run_id: str) -> None:
+        self.closed.append(run_id)
 
 
 class StaticPlanner(RuleBasedPlanner):

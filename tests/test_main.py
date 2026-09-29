@@ -55,6 +55,16 @@ def test_build_planner_rejects_unknown_mode() -> None:
         module._build_planner(Settings(PLANNER_MODE="bad"))
 
 
+def test_build_planner_rejects_models_outside_reviewed_allowlists() -> None:
+    module = importlib.import_module("incident_agent.main")
+    with pytest.raises(RuntimeError, match="BEDROCK_MODEL_ID"):
+        module._build_planner(Settings(BEDROCK_MODEL_ID="unreviewed.model"))
+    with pytest.raises(RuntimeError, match="OPENAI_MODEL"):
+        module._build_planner(
+            Settings(PLANNER_MODE="openai", OPENAI_API_KEY="test-key", OPENAI_MODEL="unreviewed-model")
+        )
+
+
 def test_settings_require_claim_renewal_before_expiry() -> None:
     with pytest.raises(ValueError, match="INCIDENT_CLAIM_RENEW_SECONDS"):
         Settings(INCIDENT_CLAIM_LEASE_SECONDS=30, INCIDENT_CLAIM_RENEW_SECONDS=30)
