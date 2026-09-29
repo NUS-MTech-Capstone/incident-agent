@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 import httpx
+from boto3.session import Session
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 from langchain_aws import ChatBedrock
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -125,7 +128,7 @@ class BedrockPlanner:
 
 
 class OpenAIPlanner:
-    endpoint = "https://api.openai.com/v1/responses"
+    direct_endpoint = "https://api.openai.com/v1/responses"
 
     def __init__(
         self,
@@ -135,6 +138,15 @@ class OpenAIPlanner:
         prompts_dir: str | Path = "",
         timeout_seconds: float = 10.0,
         transient_retry_attempts: int = 2,
+        *,
+        auth_mode: str = "api_key",
+        gateway_url: str = "",
+        gateway_target: str = "openai",
+        aws_region: str = "",
+        reasoning_effort: str = "low",
+        max_output_tokens: int = 4096,
+        aws_session: Session | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.api_key = api_key
         self.model_id = model_id
@@ -142,12 +154,34 @@ class OpenAIPlanner:
         self.prompts = PromptLoader(prompts_dir or None)
         self.timeout_seconds = timeout_seconds
         self.transient_retry_attempts = max(1, transient_retry_attempts)
+        self.auth_mode = auth_mode.strip().lower()
+        self.gateway_target = gateway_target.strip()
+        self.aws_region = aws_region.strip()
+        self.reasoning_effort = reasoning_effort.strip().lower()
+        self.max_output_tokens = max_output_tokens
+        self.aws_session = aws_session or Session(region_name=self.aws_region or None)
+        self.transport = transport
+        if self.auth_mode == "aws_iam":
+            if not gateway_url.strip() or not self.aws_region:
+                raise ValueError("AWS IAM OpenAI mode requires gateway URL and region")
+            gateway_origin = gateway_url.rstrip("/").removesuffix("/mcp")
+            self.endpoint = gateway_origin + "/inference/v1/responses"
+            self.route = f"{self.gateway_target}/{self.model_id}"
+        elif self.auth_mode == "api_key":
+            if not self.api_key.strip():
+                raise ValueError("API-key OpenAI mode requires an API key")
+            self.endpoint = self.direct_endpoint
+            self.route = self.model_id
+        else:
+            raise ValueError("Unsupported OpenAI authentication mode")
 
     def explain_model(self) -> ExplanationModel:
         return ExplanationModel(
             provider="openai",
-            plannerType="openai",
+            plannerType="openai_agentcore" if self.auth_mode == "aws_iam" else "openai",
             modelId=self.model_id,
+            awsRegion=self.aws_region,
+            gatewayRoute=self.route if self.auth_mode == "aws_iam" else "",
             temperature=None,
             maxPromptBytes=self.max_prompt_bytes,
             promptTemplates={
@@ -189,7 +223,7 @@ class OpenAIPlanner:
     async def _invoke(self, system_prompt: str, prompt: str, phase: str) -> str:
         last_error: Exception | None = None
         payload = {
-            "model": self.model_id,
+            "model": self.route,
             "input": [
                 {
                     "role": "system",
@@ -200,26 +234,65 @@ class OpenAIPlanner:
                     "content": [{"type": "input_text", "text": prompt}],
                 },
             ],
+            "reasoning": {"effort": self.reasoning_effort},
+            "text": {"verbosity": "low"},
+            "max_output_tokens": self.max_output_tokens,
+            "store": False,
         }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         for attempt in range(1, self.transient_retry_attempts + 1):
             started = time.monotonic()
             try:
-                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                    response = await client.post(self.endpoint, headers=headers, json=payload)
+                headers = self._request_headers(body)
+                async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
+                    response = await client.post(self.endpoint, headers=headers, content=body)
                     response.raise_for_status()
-                emit_metric("OpenAIRequestLatencyMs", (time.monotonic() - started) * 1000, "Milliseconds", phase=phase)
-                return _extract_openai_text(response.json())
+                response_data = response.json()
+                duration_ms = (time.monotonic() - started) * 1000
+                emit_metric(
+                    "OpenAIRequestLatencyMs",
+                    duration_ms,
+                    "Milliseconds",
+                    phase=phase,
+                    provider="openai",
+                    model=self.model_id,
+                    gatewayRoute=self.route if self.auth_mode == "aws_iam" else "direct",
+                )
+                _emit_openai_token_metrics(response_data, phase)
+                return _extract_openai_text(response_data)
             except Exception as exc:  # noqa: BLE001 - provider/API exceptions vary
                 last_error = exc
-                emit_metric("OpenAIErrors", 1, phase=phase, errorKind=type(exc).__name__)
+                error_kind = _openai_error_kind(exc)
+                emit_metric(
+                    "OpenAIErrors",
+                    1,
+                    phase=phase,
+                    provider="openai",
+                    model=self.model_id,
+                    gatewayRoute=self.route if self.auth_mode == "aws_iam" else "direct",
+                    errorKind=error_kind,
+                )
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+                    emit_metric("AgentCoreGatewayThrottles", 1, phase=phase, provider="openai")
                 if attempt >= self.transient_retry_attempts:
-                    raise OpenAIInvocationError(f"OpenAI invocation failed during {phase}: {exc}") from exc
+                    raise OpenAIInvocationError(f"OpenAI invocation failed during {phase} ({error_kind})") from exc
                 await asyncio.sleep(0.1 * attempt)
         raise RuntimeError("OpenAI invocation failed") from last_error
+
+    def _request_headers(self, body: bytes) -> dict[str, str]:
+        if self.auth_mode == "api_key":
+            return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        credentials = self.aws_session.get_credentials()
+        if credentials is None:
+            raise RuntimeError("AWS credentials are unavailable for AgentCore gateway signing")
+        request = AWSRequest(
+            method="POST",
+            url=self.endpoint,
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        SigV4Auth(credentials.get_frozen_credentials(), "bedrock-agentcore", self.aws_region).add_auth(request)
+        return {str(key): str(value) for key, value in request.headers.items()}
 
 
 class FallbackPlanner:
@@ -338,6 +411,26 @@ def _extract_openai_text(response: dict[str, Any]) -> str:
     if not text:
         raise ValueError("OpenAI response missing output text")
     return text
+
+
+def _emit_openai_token_metrics(response: dict[str, Any], phase: str) -> None:
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return
+    for field, token_type in (
+        ("input_tokens", "input"),
+        ("output_tokens", "output"),
+        ("total_tokens", "total"),
+    ):
+        value = usage.get(field)
+        if isinstance(value, int | float) and value >= 0:
+            emit_metric("OpenAITokens", float(value), "Count", phase=phase, tokenType=token_type)
+
+
+def _openai_error_kind(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP{exc.response.status_code}"
+    return type(exc).__name__
 
 
 def _bounded(prompt: str, max_prompt_bytes: int) -> str:

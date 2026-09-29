@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     planner_mode: str = Field(default="bedrock_with_fallback", alias="PLANNER_MODE")
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-5.5", alias="OPENAI_MODEL")
+    openai_auth_mode: str = Field(default="api_key", alias="OPENAI_AUTH_MODE")
+    openai_gateway_url: str = Field(default="", alias="OPENAI_GATEWAY_URL")
+    openai_gateway_target: str = Field(default="openai", alias="OPENAI_GATEWAY_TARGET")
+    openai_aws_region: str = Field(default="", alias="OPENAI_AWS_REGION")
+    openai_reasoning_effort: str = Field(default="low", alias="OPENAI_REASONING_EFFORT")
+    openai_max_output_tokens: int = Field(default=4096, alias="OPENAI_MAX_OUTPUT_TOKENS", gt=0, le=128000)
+    openai_timeout_seconds: float = Field(default=60.0, alias="OPENAI_TIMEOUT_SECONDS", gt=0, le=300)
     bedrock_region: str = Field(default="", alias="BEDROCK_REGION")
     bedrock_model_id: str = Field(default="global.amazon.nova-2-lite-v1:0", alias="BEDROCK_MODEL_ID")
     bedrock_fallback_enabled: bool = Field(default=True, alias="BEDROCK_FALLBACK_ENABLED")
@@ -54,6 +61,10 @@ class Settings(BaseSettings):
     def validate_claim_timing(self) -> Settings:
         if self.incident_claim_renew_seconds >= self.incident_claim_lease_seconds:
             raise ValueError("INCIDENT_CLAIM_RENEW_SECONDS must be less than INCIDENT_CLAIM_LEASE_SECONDS")
+        if self.openai_auth_mode.strip().lower() not in {"api_key", "aws_iam"}:
+            raise ValueError("OPENAI_AUTH_MODE must be api_key or aws_iam")
+        if self.openai_reasoning_effort.strip().lower() not in {"none", "low", "medium", "high", "xhigh"}:
+            raise ValueError("OPENAI_REASONING_EFFORT is not supported")
         return self
 
 

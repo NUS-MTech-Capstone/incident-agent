@@ -39,6 +39,8 @@ class A2APlanner:
         transient_retry_attempts: int,
         model_id: str,
         region: str,
+        provider: str | None = None,
+        gateway_route: str = "",
     ):
         self.base_url = base_url.rstrip("/")
         self.workload_token_file = workload_token_file
@@ -47,13 +49,16 @@ class A2APlanner:
         self.transient_retry_attempts = max(1, transient_retry_attempts)
         self.model_id = model_id
         self.region = region
+        self.provider = provider or "bedrock"
+        self.gateway_route = gateway_route
 
     def explain_model(self) -> ExplanationModel:
         return ExplanationModel(
-            provider="a2a-bedrock",
-            plannerType="a2a_reasoning_agent_with_rule_fallback",
+            provider=f"a2a-{self.provider}",
+            plannerType=f"a2a_{self.provider.replace('-', '_')}_reasoning_agent_with_rule_fallback",
             modelId=self.model_id,
             awsRegion=self.region,
+            gatewayRoute=self.gateway_route,
         )
 
     async def triage(self, incident: Incident) -> TriageResult:

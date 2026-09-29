@@ -77,7 +77,7 @@ warn_unreachable = true
 packages = ["incident_agent"]
 
 [[tool.mypy.overrides]]
-module = ["boto3", "langchain_aws", "a2a.*", "google.protobuf.*", "mcp.*", "httpx2"]
+module = ["boto3", "boto3.*", "botocore.*", "langchain_aws", "a2a.*", "google.protobuf.*", "mcp.*", "httpx2"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

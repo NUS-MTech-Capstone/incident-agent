@@ -24,7 +24,7 @@ from incident_agent.service import IncidentService
 from incident_agent.tool_gateway import GatewayBackend, GatewayPolicy, create_tool_gateway_app
 
 ALLOWED_BEDROCK_MODEL_IDS = {"global.amazon.nova-2-lite-v1:0"}
-ALLOWED_OPENAI_MODEL_IDS = {"gpt-5.5"}
+ALLOWED_OPENAI_MODEL_IDS = {"gpt-5.5", "gpt-5.4-2026-03-05"}
 
 
 def _database_url_from_secret(secret_id: str, region_name: str) -> str:
@@ -52,14 +52,19 @@ def build_service() -> IncidentService:
         settings.transient_retry_attempts,
         tool_gateway_url=settings.tool_gateway_url,
     )
+    openai_mode = settings.planner_mode.strip().lower().startswith("openai")
     planner = A2APlanner(
         settings.reasoning_agent_url,
         settings.workload_token_file,
         RuleBasedPlanner(),
         settings.http_timeout_seconds,
         settings.transient_retry_attempts,
-        settings.bedrock_model_id,
-        settings.bedrock_region or settings.aws_region,
+        settings.openai_model if openai_mode else settings.bedrock_model_id,
+        (settings.openai_aws_region or settings.aws_region)
+        if openai_mode
+        else (settings.bedrock_region or settings.aws_region),
+        provider="openai-agentcore" if openai_mode and settings.openai_auth_mode == "aws_iam" else None,
+        gateway_route=f"{settings.openai_gateway_target}/{settings.openai_model}" if openai_mode else "",
     )
     workflow = IncidentWorkflow(planner, ddm, settings.operation_timeout_seconds, settings.max_operation_output_bytes)
     return IncidentService(
@@ -78,8 +83,11 @@ def _build_planner(settings: Settings) -> BedrockPlanner | FallbackPlanner | Ope
     if mode == "rule_based":
         return RuleBasedPlanner()
     if mode in {"openai", "openai_with_fallback"}:
-        if not settings.openai_api_key.strip():
-            raise RuntimeError("OPENAI_API_KEY is required when PLANNER_MODE uses OpenAI")
+        auth_mode = settings.openai_auth_mode.strip().lower()
+        if auth_mode == "api_key" and not settings.openai_api_key.strip():
+            raise RuntimeError("OPENAI_API_KEY is required when OPENAI_AUTH_MODE=api_key")
+        if auth_mode == "aws_iam" and not settings.openai_gateway_url.strip():
+            raise RuntimeError("OPENAI_GATEWAY_URL is required when OPENAI_AUTH_MODE=aws_iam")
         if settings.openai_model not in ALLOWED_OPENAI_MODEL_IDS:
             raise RuntimeError("OPENAI_MODEL is not in the reviewed model allowlist")
         openai_planner = OpenAIPlanner(
@@ -87,8 +95,14 @@ def _build_planner(settings: Settings) -> BedrockPlanner | FallbackPlanner | Ope
             settings.openai_model,
             settings.bedrock_max_prompt_bytes,
             settings.incident_agent_prompts_dir,
-            settings.http_timeout_seconds,
+            settings.openai_timeout_seconds,
             settings.transient_retry_attempts,
+            auth_mode=auth_mode,
+            gateway_url=settings.openai_gateway_url,
+            gateway_target=settings.openai_gateway_target,
+            aws_region=settings.openai_aws_region or settings.aws_region,
+            reasoning_effort=settings.openai_reasoning_effort,
+            max_output_tokens=settings.openai_max_output_tokens,
         )
         if mode == "openai":
             return openai_planner

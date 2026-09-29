@@ -41,11 +41,36 @@ def test_build_planner_openai_with_fallback_wraps_openai() -> None:
     assert isinstance(planner.primary, OpenAIPlanner)
 
 
+def test_build_planner_openai_iam_mode_uses_gateway_without_api_key() -> None:
+    module = importlib.import_module("incident_agent.main")
+
+    planner = module._build_planner(
+        Settings(
+            PLANNER_MODE="openai_with_fallback",
+            OPENAI_AUTH_MODE="aws_iam",
+            OPENAI_GATEWAY_URL="https://gateway.example.com",
+            OPENAI_MODEL="gpt-5.4-2026-03-05",
+        )
+    )
+
+    assert isinstance(planner, FallbackPlanner)
+    assert isinstance(planner.primary, OpenAIPlanner)
+    assert planner.primary.api_key == ""
+    assert planner.primary.route == "openai/gpt-5.4-2026-03-05"
+
+
 def test_build_planner_openai_mode_requires_key() -> None:
     module = importlib.import_module("incident_agent.main")
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         module._build_planner(Settings(PLANNER_MODE="openai"))
+
+
+def test_build_planner_openai_iam_mode_requires_gateway_url() -> None:
+    module = importlib.import_module("incident_agent.main")
+
+    with pytest.raises(RuntimeError, match="OPENAI_GATEWAY_URL"):
+        module._build_planner(Settings(PLANNER_MODE="openai", OPENAI_AUTH_MODE="aws_iam"))
 
 
 def test_build_planner_rejects_unknown_mode() -> None:
