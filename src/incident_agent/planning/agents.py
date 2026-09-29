@@ -27,9 +27,13 @@ REMEDIATION_EXECUTOR_AGENT = "Remediation Executor Agent"
 
 def agent_definitions(planner_type: str) -> list[ExplanationAgent]:
     uses_a2a = planner_type.startswith("a2a_")
+    uses_a2a_openai = uses_a2a and "openai" in planner_type
     uses_bedrock = planner_type.startswith("bedrock")
     uses_openai = planner_type.startswith("openai")
-    if uses_a2a:
+    if uses_a2a_openai:
+        model_reasoning = "OpenAI LLM structured reasoning over authenticated A2A with deterministic fallback"
+        planner_tool = "Incident Reasoning Agent over A2A and AgentCore"
+    elif uses_a2a:
         model_reasoning = "Bedrock LLM structured reasoning over authenticated A2A with deterministic fallback"
         planner_tool = "Incident Reasoning Agent over A2A"
     elif uses_bedrock:
@@ -44,7 +48,7 @@ def agent_definitions(planner_type: str) -> list[ExplanationAgent]:
     if planner_type == "bedrock_with_rule_fallback":
         model_reasoning = "Bedrock LLM structured reasoning with deterministic fallback"
         planner_tool = "Bedrock via LangChain, RuleBasedPlanner"
-    if planner_type == "openai_with_rule_fallback":
+    if planner_type.startswith("openai") and planner_type.endswith("with_rule_fallback"):
         model_reasoning = "OpenAI LLM structured reasoning with deterministic fallback"
         planner_tool = "OpenAI Responses API, RuleBasedPlanner"
     return [

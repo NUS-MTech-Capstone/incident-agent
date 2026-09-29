@@ -136,6 +136,7 @@ class ExplanationModel(BaseModel):
     planner_type: str = Field(alias="plannerType", default="")
     model_id: str = Field(alias="modelId", default="")
     aws_region: str = Field(alias="awsRegion", default="")
+    gateway_route: str = Field(alias="gatewayRoute", default="")
     temperature: float | None = None
     max_prompt_bytes: int = Field(alias="maxPromptBytes", default=0)
     prompt_templates: dict[str, str] = Field(alias="promptTemplates", default_factory=dict)

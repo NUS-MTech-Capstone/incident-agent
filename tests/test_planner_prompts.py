@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from botocore.credentials import Credentials
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from incident_agent.models import ExplanationModel, Incident, IncidentState, OperationResult
+from incident_agent.planning.agents import agent_definitions
 from incident_agent.planning.planner import (
     BedrockInvocationError,
     BedrockPlanner,
@@ -39,6 +43,15 @@ class FailingPlanner:
 
     async def plan(self, incident: Incident, evidence: list[OperationResult]):
         raise BedrockInvocationError("quota exhausted")
+
+
+class FakeAWSSession:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_credentials(self) -> Credentials:
+        self.calls += 1
+        return Credentials("access-key", "secret-key", "session-token")
 
 
 @pytest.fixture
@@ -108,6 +121,99 @@ def test_openai_planner_explain_model_identifies_provider(prompts_dir: Path) -> 
     assert model.provider == "openai"
     assert model.planner_type == "openai"
     assert model.model_id == "gpt-5.5"
+
+
+def test_a2a_openai_explanation_identifies_agentcore_path() -> None:
+    agents = agent_definitions("a2a_openai_agentcore_reasoning_agent_with_rule_fallback")
+
+    assert agents[1].reasoning_type.startswith("OpenAI LLM")
+    assert agents[1].tools == ["Incident Reasoning Agent over A2A and AgentCore"]
+
+
+@pytest.mark.asyncio
+async def test_openai_api_key_request_uses_responses_payload_limits(prompts_dir: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"output_text": "ok", "usage": {"total_tokens": 7}})
+
+    planner = OpenAIPlanner(
+        "test-key",
+        "gpt-5.4-2026-03-05",
+        4096,
+        prompts_dir,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert await planner._invoke("system", "user", "triage") == "ok"
+    payload = json.loads(requests[0].content)
+    assert requests[0].url == "https://api.openai.com/v1/responses"
+    assert requests[0].headers["Authorization"] == "Bearer test-key"
+    assert payload["model"] == "gpt-5.4-2026-03-05"
+    assert payload["reasoning"] == {"effort": "low"}
+    assert payload["text"] == {"verbosity": "low"}
+    assert payload["max_output_tokens"] == 4096
+    assert payload["store"] is False
+
+
+@pytest.mark.asyncio
+async def test_openai_iam_request_is_sigv4_signed_and_refreshes_credentials(prompts_dir: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503, json={"error": "unavailable"})
+        return httpx.Response(200, json={"output_text": "ok"})
+
+    session = FakeAWSSession()
+    planner = OpenAIPlanner(
+        "",
+        "gpt-5.4-2026-03-05",
+        4096,
+        prompts_dir,
+        transient_retry_attempts=2,
+        auth_mode="aws_iam",
+        gateway_url="https://gateway.example.com/mcp",
+        aws_region="ap-southeast-1",
+        aws_session=session,  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert await planner._invoke("system", "user", "plan") == "ok"
+    payload = json.loads(requests[-1].content)
+    assert session.calls == 2
+    assert str(requests[-1].url) == "https://gateway.example.com/inference/v1/responses"
+    assert requests[-1].headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=access-key/")
+    assert requests[-1].headers["X-Amz-Security-Token"] == "session-token"
+    assert "bedrock-agentcore" in requests[-1].headers["Authorization"]
+    assert payload["model"] == "openai/gpt-5.4-2026-03-05"
+
+
+@pytest.mark.asyncio
+async def test_openai_gateway_failure_falls_back_after_bounded_attempts(prompts_dir: Path) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(503, json={"error": "unavailable"})
+
+    primary = OpenAIPlanner(
+        "test-key",
+        "gpt-5.4-2026-03-05",
+        4096,
+        prompts_dir,
+        transient_retry_attempts=2,
+        transport=httpx.MockTransport(handler),
+    )
+    planner = FallbackPlanner(primary, RuleBasedPlanner())
+
+    triage = await planner.triage(_incident())
+
+    assert attempts == 2
+    assert triage.rationale == "Deterministic fallback triage based on alarm reason."
 
 
 def test_extract_openai_text_supports_output_text() -> None:

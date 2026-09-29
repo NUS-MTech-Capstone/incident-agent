@@ -42,8 +42,15 @@ STS_URL=http://sts:8082
 TOOL_POLICY_FILE=
 PROXY_CONTROLPLANE_URL=http://proxy-controlplane:8080
 WORKLOAD_TOKEN_FILE=/var/run/secrets/tokens/incident-agent-token
-PLANNER_MODE=bedrock_with_fallback
-OPENAI_MODEL=gpt-5.5
+PLANNER_MODE=openai_with_fallback
+OPENAI_MODEL=gpt-5.4-2026-03-05
+OPENAI_AUTH_MODE=aws_iam
+OPENAI_GATEWAY_URL=
+OPENAI_GATEWAY_TARGET=openai
+OPENAI_AWS_REGION=ap-southeast-1
+OPENAI_REASONING_EFFORT=low
+OPENAI_MAX_OUTPUT_TOKENS=4096
+OPENAI_TIMEOUT_SECONDS=60
 OPENAI_API_KEY=
 BEDROCK_REGION=us-east-1
 BEDROCK_MODEL_ID=global.amazon.nova-2-lite-v1:0
@@ -82,8 +89,8 @@ Planner prompt templates live under the repository root `prompts/` directory.
 `INCIDENT_AGENT_PROMPTS_DIR` may point at another template directory for local
 experiments or environment-specific packaging; if unset, the service resolves
 the root `prompts/` directory and the Docker image copies it to `/app/prompts`.
-`PLANNER_MODE` controls model usage. Dev is configured for Nova 2 Lite through
-Bedrock after the account quota request is approved:
+`PLANNER_MODE` controls model usage. Dev uses the IAM-authenticated AgentCore
+inference gateway and pinned `gpt-5.4-2026-03-05` with deterministic fallback:
 
 - `bedrock_with_fallback`: Bedrock first, then deterministic fallback on
   provider invocation failure.
@@ -94,19 +101,33 @@ Bedrock after the account quota request is approved:
 - `rule_based`: deterministic triage and planning, no LLM calls.
 
 Provider modes and model IDs are code allowlisted before a provider client is
-constructed. The deployed Reasoning Agent is fixed to Bedrock and the reviewed
-Nova 2 Lite model. OpenAI modes remain available only for explicit local
-experiments and are not wired into the production Kubernetes deployment. Never
-put an API key in this README, Kustomize overlays, Terraform variables, shell
-history, or committed manifests.
+constructed. `OPENAI_AUTH_MODE=aws_iam` signs every request for service
+`bedrock-agentcore` with the current IRSA credentials. The Terraform gateway
+URL ends in `/mcp`; the client removes that MCP suffix and sends inference to
+`/inference/v1/responses`. The gateway route is
+`openai/gpt-5.4-2026-03-05`. The pod has `InvokeGateway` permission but no
+permission to read the OpenAI secret. `OPENAI_AUTH_MODE=api_key` remains
+available for local development and is the only mode that requires
+`OPENAI_API_KEY`. Never put an API key in this README, Kustomize overlays,
+Terraform variables, shell history, or committed manifests.
 
-`BEDROCK_REGION` overrides only the Bedrock runtime client region. Leave
+OpenAI requests use `reasoning.effort=low`, low text verbosity,
+`max_output_tokens=4096`, `store=false`, a 60-second provider timeout, and at
+most two attempts. The dedicated OpenAI project is intentionally opted into
+input/output sharing for complimentary usage. `store=false` disables Responses
+API application storage for these calls; it does not override that project
+sharing choice. Prompts and evidence therefore remain redacted, bounded, and
+free of credentials or terminal streams.
+
+`BEDROCK_REGION` overrides only the compatibility Bedrock runtime client region. Leave
 `AWS_REGION` set to the deployment region for SQS, Secrets Manager, and other
 AWS dependencies. `global.amazon.nova-2-lite-v1:0` in `us-east-1` is the
 configured Bedrock model for dev; if the Nova quota was requested in another
 region, set `BEDROCK_REGION` to that region before rollout.
-Provider fallback modes handle availability errors such as throttling, quota
+The deployed OpenAI fallback mode handles availability errors such as throttling, quota
 exhaustion, and network failures by using the deterministic `RuleBasedPlanner`.
+It never falls back to Bedrock or Nova. Bedrock modes and `gpt-5.5` remain in
+the reviewed compatibility allowlists but are not selected by the dev workload.
 Invalid model JSON, oversized prompts, and plan validation failures still fail
 the incident because those are correctness or safety failures, not provider
 availability failures.
