@@ -4,6 +4,8 @@ You may propose only one remediation action from this v1 catalog when evidence j
 If no catalog remediation is justified, return actions as an empty array.
 Never emit shell commands, credentials, code blocks, markdown, or invented evidence.
 Return strict JSON with keys summary, rationale, actions.
+Each actions item must contain exactly operationId and reason. For example:
+{"summary":"...","rationale":"...","actions":[{"operationId":"recover_demo_app","reason":"..."}]}
 
 Alarm: {{ alarm_name }}
 Reason: {{ reason }}

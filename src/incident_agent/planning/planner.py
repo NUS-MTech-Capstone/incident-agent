@@ -17,6 +17,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from incident_agent.models import Action, ExplanationModel, Incident, OperationResult, Plan, Priority, TriageResult
 from incident_agent.observability import emit_metric
+from incident_agent.planning.catalog import DIAGNOSTIC_OPERATIONS, REMEDIATION_OPERATIONS
 from incident_agent.planning.prompt_loader import PromptLoader
 
 
@@ -235,7 +236,10 @@ class OpenAIPlanner:
                 },
             ],
             "reasoning": {"effort": self.reasoning_effort},
-            "text": {"verbosity": "low"},
+            "text": {
+                "verbosity": "low",
+                "format": _openai_response_format(phase),
+            },
             "max_output_tokens": self.max_output_tokens,
             "store": False,
         }
@@ -377,6 +381,64 @@ class RuleBasedPlanner:
 
 def _decode_triage(text: str) -> TriageResult:
     return TriageResult.model_validate_json(_strip_fence(text))
+
+
+def _openai_response_format(phase: str) -> dict[str, Any]:
+    if phase == "triage":
+        schema = {
+            "type": "object",
+            "properties": {
+                "priority": {"type": "string", "enum": [item.value for item in Priority]},
+                "category": {"type": "string"},
+                "summary": {"type": "string"},
+                "rationale": {"type": "string"},
+                "suggestedDiagnosticOperationIds": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": DIAGNOSTIC_OPERATIONS},
+                    "maxItems": 5,
+                },
+            },
+            "required": [
+                "priority",
+                "category",
+                "summary",
+                "rationale",
+                "suggestedDiagnosticOperationIds",
+            ],
+            "additionalProperties": False,
+        }
+    elif phase == "plan":
+        schema = {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "rationale": {"type": "string"},
+                "actions": {
+                    "type": "array",
+                    "maxItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "operationId": {"type": "string", "enum": REMEDIATION_OPERATIONS},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["operationId", "reason"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["summary", "rationale", "actions"],
+            "additionalProperties": False,
+        }
+    else:
+        raise ValueError("Unsupported OpenAI response phase")
+    return {
+        "type": "json_schema",
+        "name": f"incident_{phase}",
+        "description": "Bounded DenDenMushi incident analysis output.",
+        "schema": schema,
+        "strict": True,
+    }
 
 
 def _strip_fence(text: str) -> str:

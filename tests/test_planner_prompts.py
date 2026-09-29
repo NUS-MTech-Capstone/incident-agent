@@ -152,7 +152,13 @@ async def test_openai_api_key_request_uses_responses_payload_limits(prompts_dir:
     assert requests[0].headers["Authorization"] == "Bearer test-key"
     assert payload["model"] == "gpt-5.4-2026-03-05"
     assert payload["reasoning"] == {"effort": "low"}
-    assert payload["text"] == {"verbosity": "low"}
+    assert payload["text"]["verbosity"] == "low"
+    response_format = payload["text"]["format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["name"] == "incident_triage"
+    assert response_format["strict"] is True
+    assert response_format["schema"]["additionalProperties"] is False
+    assert response_format["schema"]["properties"]["suggestedDiagnosticOperationIds"]["maxItems"] == 5
     assert payload["max_output_tokens"] == 4096
     assert payload["store"] is False
 
@@ -189,6 +195,18 @@ async def test_openai_iam_request_is_sigv4_signed_and_refreshes_credentials(prom
     assert requests[-1].headers["X-Amz-Security-Token"] == "session-token"
     assert "bedrock-agentcore" in requests[-1].headers["Authorization"]
     assert payload["model"] == "openai/gpt-5.4-2026-03-05"
+    response_format = payload["text"]["format"]
+    assert response_format["name"] == "incident_plan"
+    assert response_format["strict"] is True
+    assert response_format["schema"]["properties"]["actions"]["maxItems"] == 1
+    action_schema = response_format["schema"]["properties"]["actions"]["items"]
+    assert action_schema["required"] == ["operationId", "reason"]
+    assert action_schema["additionalProperties"] is False
+    assert action_schema["properties"]["operationId"]["enum"] == [
+        "restart_service",
+        "recover_demo_app",
+        "reload_service",
+    ]
 
 
 @pytest.mark.asyncio
