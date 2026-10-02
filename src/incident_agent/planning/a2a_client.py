@@ -17,6 +17,7 @@ from incident_agent.models import ExplanationModel, Incident, OperationResult, P
 from incident_agent.observability import emit_metric, log_event
 from incident_agent.planning.planner import Planner
 from incident_agent.redact import text as redact_text
+from incident_agent.trace import TraceRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class A2APlanner:
         region: str,
         provider: str | None = None,
         gateway_route: str = "",
+        trace_recorder: TraceRecorder | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.workload_token_file = workload_token_file
@@ -51,6 +53,7 @@ class A2APlanner:
         self.region = region
         self.provider = provider or "bedrock"
         self.gateway_route = gateway_route
+        self.trace_recorder = trace_recorder
 
     def explain_model(self) -> ExplanationModel:
         return ExplanationModel(
@@ -62,18 +65,63 @@ class A2APlanner:
         )
 
     async def triage(self, incident: Incident) -> TriageResult:
+        started = time.monotonic()
         try:
             payload = await self._invoke(
                 "triage",
                 {"incident": _sanitized_incident(incident)},
                 incident.id,
             )
-            return TriageResult.model_validate(payload)
+            result = TriageResult.model_validate(payload)
         except A2AAvailabilityError:
             emit_metric("A2AFallbacks", 1, phase="triage")
-            return await self.fallback.triage(incident)
+            try:
+                result = await self.fallback.triage(incident)
+            except Exception:
+                self._record_action(
+                    incident.id,
+                    "triage",
+                    "FAILED",
+                    "Reasoning Agent and deterministic triage fallback failed.",
+                    started,
+                    True,
+                    "DETERMINISTIC",
+                )
+                raise
+            self._record_action(
+                incident.id,
+                "triage",
+                "FALLBACK",
+                "Reasoning Agent was unavailable; deterministic triage fallback completed.",
+                started,
+                True,
+                "DETERMINISTIC",
+            )
+            return result
+        except Exception:
+            self._record_action(
+                incident.id,
+                "triage",
+                "FAILED",
+                "Reasoning Agent rejected or failed the structured triage handoff.",
+                started,
+                False,
+                "MODEL_ASSISTED",
+            )
+            raise
+        self._record_action(
+            incident.id,
+            "triage",
+            "SUCCEEDED",
+            "Reasoning Agent completed structured incident triage.",
+            started,
+            False,
+            "MODEL_ASSISTED",
+        )
+        return result
 
     async def plan(self, incident: Incident, evidence: list[OperationResult]) -> Plan:
+        started = time.monotonic()
         try:
             payload = await self._invoke(
                 "plan",
@@ -83,10 +131,75 @@ class A2APlanner:
                 },
                 incident.id,
             )
-            return Plan.model_validate(payload)
+            result = Plan.model_validate(payload)
         except A2AAvailabilityError:
             emit_metric("A2AFallbacks", 1, phase="plan")
-            return await self.fallback.plan(incident, evidence)
+            try:
+                result = await self.fallback.plan(incident, evidence)
+            except Exception:
+                self._record_action(
+                    incident.id,
+                    "plan",
+                    "FAILED",
+                    "Reasoning Agent and deterministic plan fallback failed.",
+                    started,
+                    True,
+                    "DETERMINISTIC",
+                )
+                raise
+            self._record_action(
+                incident.id,
+                "plan",
+                "FALLBACK",
+                "Reasoning Agent was unavailable; deterministic plan fallback completed.",
+                started,
+                True,
+                "DETERMINISTIC",
+            )
+            return result
+        except Exception:
+            self._record_action(
+                incident.id,
+                "plan",
+                "FAILED",
+                "Reasoning Agent rejected or failed the structured planning handoff.",
+                started,
+                False,
+                "MODEL_ASSISTED",
+            )
+            raise
+        self._record_action(
+            incident.id,
+            "plan",
+            "SUCCEEDED",
+            "Reasoning Agent completed the structured remediation proposal.",
+            started,
+            False,
+            "MODEL_ASSISTED",
+        )
+        return result
+
+    def _record_action(
+        self,
+        incident_id: str,
+        stage: str,
+        status: str,
+        summary: str,
+        started: float,
+        fallback_used: bool,
+        actor_type: str,
+    ) -> None:
+        if self.trace_recorder is None:
+            return
+        self.trace_recorder.agent_action(
+            incident_id,
+            stage,
+            status,
+            summary,
+            (time.monotonic() - started) * 1000,
+            fallback_used,
+            actor_type,
+        )
 
     async def _invoke(self, stage: str, data: dict[str, Any], incident_id: str) -> dict[str, Any]:
         request_started = time.monotonic()

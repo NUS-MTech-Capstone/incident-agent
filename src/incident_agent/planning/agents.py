@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from incident_agent.automation.ddm import DDMClient
@@ -16,6 +17,7 @@ from incident_agent.planning.catalog import select_diagnostic_operations
 from incident_agent.planning.planner import Planner
 from incident_agent.planning.supervisor import plan_hash, validate_execution, validate_plan
 from incident_agent.redact import text as redact_text
+from incident_agent.trace import TraceRecorder
 
 INCIDENT_MANAGER_AGENT = "Incident Manager Agent"
 TRIAGE_AGENT = "Triage Agent"
@@ -154,9 +156,10 @@ class TriageAgent:
 
 
 class EvidenceCollectorAgent:
-    def __init__(self, ddm: DDMClient, max_operation_output: int):
+    def __init__(self, ddm: DDMClient, max_operation_output: int, trace_recorder: TraceRecorder | None = None):
         self.ddm = ddm
         self.max_operation_output = max_operation_output
+        self.trace_recorder = trace_recorder
 
     async def run(self, incident: Incident, suggested_operations: list[str]) -> EvidenceCollection:
         operations = select_diagnostic_operations(suggested_operations)
@@ -166,21 +169,36 @@ class EvidenceCollectorAgent:
         evidence: list[OperationResult] = []
         decisions: list[ExplanationToolDecision] = []
         for operation in operations:
-            decisions.append(
-                ExplanationToolDecision(
-                    operationId=operation,
-                    phase="diagnose",
-                    chosenBy="policy",
-                    reason="Default bounded diagnostic operation from the v1 catalog.",
-                )
+            decision = ExplanationToolDecision(
+                operationId=operation,
+                phase="diagnose",
+                chosenBy="policy",
+                reason="Default bounded diagnostic operation from the v1 catalog.",
             )
+            decisions.append(decision)
+            started = time.monotonic()
             try:
                 result = await self.ddm.execute(run.run_id, operation)
             except Exception as exc:  # noqa: BLE001 - diagnostic failures are evidence
                 result = OperationResult(operationId=operation, stderr=str(exc), exitCode=-1)
+            output_truncated = self.max_operation_output > 0 and (
+                len(result.stdout.encode("utf-8")) > self.max_operation_output
+                or len(result.stderr.encode("utf-8")) > self.max_operation_output
+            )
             result.stdout = redact_text(result.stdout, self.max_operation_output)
             result.stderr = redact_text(result.stderr, self.max_operation_output)
             evidence.append(result)
+            if self.trace_recorder is not None:
+                self.trace_recorder.tool_call(
+                    incident.id,
+                    operation,
+                    "diagnose",
+                    decision.chosen_by,
+                    decision.reason,
+                    result,
+                    (time.monotonic() - started) * 1000,
+                    output_truncated,
+                )
         return EvidenceCollection(incident=incident, evidence=evidence, decisions=decisions)
 
 

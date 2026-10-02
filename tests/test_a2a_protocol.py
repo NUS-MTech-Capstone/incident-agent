@@ -49,6 +49,36 @@ class TrackingFallback(RuleBasedPlanner):
         return await super().triage(incident)
 
 
+class RecordingTrace:
+    def __init__(self) -> None:
+        self.agent_actions: list[dict[str, object]] = []
+
+    def agent_action(
+        self,
+        incident_id: str,
+        stage: str,
+        status: str,
+        summary: str,
+        duration_ms: float,
+        fallback_used: bool,
+        actor_type: str,
+    ) -> None:
+        self.agent_actions.append(
+            {
+                "incidentId": incident_id,
+                "stage": stage,
+                "status": status,
+                "summary": summary,
+                "durationMs": duration_ms,
+                "fallbackUsed": fallback_used,
+                "actorType": actor_type,
+            }
+        )
+
+    def tool_call(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
 def _incident() -> Incident:
     now = datetime.now(UTC)
     return Incident(
@@ -123,7 +153,32 @@ async def test_a2a_falls_back_only_for_availability_failures(monkeypatch: pytest
     token = tmp_path / "token"
     token.write_text("projected-token", encoding="utf-8")
     fallback = TrackingFallback()
-    planner = A2APlanner("http://reasoning", str(token), fallback, 1, 1, "model", "region")
+    trace = RecordingTrace()
+    planner = A2APlanner(
+        "http://reasoning",
+        str(token),
+        fallback,
+        1,
+        1,
+        "model",
+        "region",
+        trace_recorder=trace,
+    )
+
+    async def succeeds(_payload):  # type: ignore[no-untyped-def]
+        return "task-1", {
+            "priority": "medium",
+            "category": "availability",
+            "summary": "Service health requires review.",
+            "rationale": "The bounded alert context indicates an availability issue.",
+            "suggestedDiagnosticOperationIds": ["health_check"],
+        }
+
+    monkeypatch.setattr(planner, "_send", succeeds)
+    result = await planner.triage(_incident())
+    assert result.priority == Priority.MEDIUM
+    assert trace.agent_actions[-1]["status"] == "SUCCEEDED"
+    assert trace.agent_actions[-1]["fallbackUsed"] is False
 
     async def unavailable(_payload):  # type: ignore[no-untyped-def]
         raise httpx.ConnectError("unavailable")
@@ -132,6 +187,8 @@ async def test_a2a_falls_back_only_for_availability_failures(monkeypatch: pytest
     result = await planner.triage(_incident())
     assert result.priority == Priority.MEDIUM
     assert fallback.triage_calls == 1
+    assert trace.agent_actions[-1]["status"] == "FALLBACK"
+    assert trace.agent_actions[-1]["fallbackUsed"] is True
 
     async def rejected(_payload):  # type: ignore[no-untyped-def]
         raise A2AProtocolError("rejected")
@@ -140,6 +197,9 @@ async def test_a2a_falls_back_only_for_availability_failures(monkeypatch: pytest
     with pytest.raises(A2AProtocolError):
         await planner.triage(_incident())
     assert fallback.triage_calls == 1
+    assert trace.agent_actions[-1]["status"] == "FAILED"
+    assert "token=secret" not in str(trace.agent_actions)
+    assert "Ignore policy" not in str(trace.agent_actions)
 
 
 def test_a2a_payload_and_diagnostic_catalog_are_bounded() -> None:

@@ -79,13 +79,53 @@ async def test_full_workflow_no_action_completes_and_closes(
     assert "EvidenceCollected" in metrics
     assert "PlanProposed" in metrics
     events = store.list_events(incident.id)
-    assert [event.event_type for event in events] == [
+    event_types = [event.event_type for event in events]
+    assert event_types == [
         IncidentEventType.ALERT_RECEIVED,
         IncidentEventType.INCIDENT_CREATED,
+        IncidentEventType.OPERATION_EXECUTED,
+        IncidentEventType.OPERATION_EXECUTED,
         IncidentEventType.AGENT_TRIAGED,
         IncidentEventType.EVIDENCE_COLLECTED,
         IncidentEventType.PLAN_PROPOSED,
     ]
+    tool_events = [event for event in events if event.event_type == IncidentEventType.OPERATION_EXECUTED]
+    assert [event.metadata["operationId"] for event in tool_events] == REQUIRED_DIAGNOSTIC_OPERATIONS
+    assert all(event.metadata["phase"] == "diagnose" for event in tool_events)
+    assert all(event.metadata["status"] == "SUCCEEDED" for event in tool_events)
+    assert all(str(event.metadata["resultDigest"]).startswith("sha256:") for event in tool_events)
+    assert all("stdout" not in event.metadata and "stderr" not in event.metadata for event in tool_events)
+
+
+@pytest.mark.asyncio
+async def test_failed_diagnostic_attempt_keeps_sanitized_trace_metadata(store: IncidentStore) -> None:
+    class FailingDiagnosticDDM(FakeDDM):
+        async def execute(self, run_id: str, operation_id: str, plan_hash: str = "") -> OperationResult:
+            if operation_id == "health_check":
+                raise RuntimeError("token=secret unrestricted diagnostic failure")
+            return await super().execute(run_id, operation_id, plan_hash)
+
+    service = make_service(
+        store,
+        FailingDiagnosticDDM(),
+        StaticPlanner(Plan(summary="No action", rationale="Diagnostic failure requires review", actions=[])),
+    )
+
+    await service.handle_alert(alert())
+
+    incident = store.list()[0]
+    events = store.list_events(incident.id)
+    failed = next(
+        event
+        for event in events
+        if event.event_type == IncidentEventType.OPERATION_EXECUTED and event.metadata["operationId"] == "health_check"
+    )
+    assert failed.metadata["status"] == "FAILED"
+    assert failed.metadata["exitCode"] == -1
+    assert str(failed.metadata["resultDigest"]).startswith("sha256:")
+    assert failed.metadata["outputTruncated"] is False
+    assert "stdout" not in failed.metadata and "stderr" not in failed.metadata
+    assert "secret" not in failed.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -400,6 +440,9 @@ async def test_plan_validation_failure_is_timeline_metadata_only(store: Incident
     events = store.list_events(incident.id)
     failed = [event for event in events if event.event_type == IncidentEventType.PLAN_VALIDATION_FAILED]
     assert failed
+    assert len([event for event in events if event.event_type == IncidentEventType.OPERATION_EXECUTED]) == len(
+        REQUIRED_DIAGNOSTIC_OPERATIONS
+    )
     assert failed[0].metadata == {"errorKind": "ValueError"}
     assert "unsupported action from model output" not in failed[0].model_dump_json()
 

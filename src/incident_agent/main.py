@@ -22,6 +22,7 @@ from incident_agent.planning.planner import BedrockPlanner, FallbackPlanner, Ope
 from incident_agent.planning.workflow import IncidentWorkflow
 from incident_agent.service import IncidentService
 from incident_agent.tool_gateway import GatewayBackend, GatewayPolicy, create_tool_gateway_app
+from incident_agent.trace import IncidentTraceRecorder
 
 ALLOWED_BEDROCK_MODEL_IDS = {"global.amazon.nova-2-lite-v1:0"}
 ALLOWED_OPENAI_MODEL_IDS = {"gpt-5.5", "gpt-5.4-2026-03-05"}
@@ -44,6 +45,7 @@ def build_service() -> IncidentService:
     if not database_url:
         raise RuntimeError("DATABASE_URL or DATABASE_SECRET_ID is required")
     store = IncidentStore(database_url)
+    trace_recorder = IncidentTraceRecorder(store)
     controlplane_url = settings.agent_controlplane_url or settings.proxy_controlplane_url
     ddm = DDMClient(
         controlplane_url,
@@ -65,8 +67,15 @@ def build_service() -> IncidentService:
         else (settings.bedrock_region or settings.aws_region),
         provider="openai-agentcore" if openai_mode and settings.openai_auth_mode == "aws_iam" else None,
         gateway_route=f"{settings.openai_gateway_target}/{settings.openai_model}" if openai_mode else "",
+        trace_recorder=trace_recorder,
     )
-    workflow = IncidentWorkflow(planner, ddm, settings.operation_timeout_seconds, settings.max_operation_output_bytes)
+    workflow = IncidentWorkflow(
+        planner,
+        ddm,
+        settings.operation_timeout_seconds,
+        settings.max_operation_output_bytes,
+        trace_recorder,
+    )
     return IncidentService(
         store,
         workflow,
