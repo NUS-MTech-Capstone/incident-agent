@@ -26,6 +26,7 @@ from incident_agent.planning.agents import (
 )
 from incident_agent.planning.catalog import CATALOG_VERSION, DIAGNOSTIC_OPERATIONS, VERIFY_OPERATIONS
 from incident_agent.planning.planner import Planner
+from incident_agent.trace import TraceRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +41,20 @@ class WorkflowState(TypedDict, total=False):
 
 
 class IncidentWorkflow:
-    def __init__(self, planner: Planner, ddm: DDMClient, operation_timeout: float, max_operation_output: int):
+    def __init__(
+        self,
+        planner: Planner,
+        ddm: DDMClient,
+        operation_timeout: float,
+        max_operation_output: int,
+        trace_recorder: TraceRecorder | None = None,
+    ):
         self.planner = planner
         self.ddm = ddm
         self.operation_timeout = operation_timeout
         self.max_operation_output = max_operation_output
         self.triage_agent = TriageAgent(planner)
-        self.evidence_collector_agent = EvidenceCollectorAgent(ddm, max_operation_output)
+        self.evidence_collector_agent = EvidenceCollectorAgent(ddm, max_operation_output, trace_recorder)
         self.action_plan_agent = ActionPlanAgent(planner)
         self.action_plan_reviewer_agent = ActionPlanReviewerAgent()
         self.graph = self._build_graph()

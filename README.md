@@ -203,12 +203,24 @@ plan hash drift, missing approval, multiple remediation actions, and execution
 outside the v1 remediation catalog.
 
 Each incident stores safe explainability metadata in `explanation_json`: model
-provider/type/ID, Bedrock region, prompt template hashes, catalog version,
+provider/type/ID, region and safe gateway route, prompt template hashes, catalog version,
 named agent roles, reasoning types, memory scope, tools, inputs, outputs,
 handoffs, diagnostic and verification operation IDs, tool-selection reasons,
 guardrail outcomes, and responsibility boundaries. It intentionally excludes
 rendered prompts, model responses, tokens, command bodies, secrets, and
 terminal streams.
+
+The append-only `incident_events` stream is also the source of truth for the
+versioned action trace returned by Agent Control Plane. Every A2A triage and
+plan attempt records an `AgentDelegated` event with stage, actor boundary,
+protocol, duration, outcome, and fallback flag. Every diagnostic attempt
+records an `OperationExecuted` event with phase, operation ID, selection
+authority, duration, status, exit code, truncation, and a SHA-256 digest of the
+already bounded/redacted result. Failed calls are persisted before workflow
+failure handling, and provider fallback is recorded explicitly rather than
+presented as model success. These event records contain safe summaries only;
+they never store prompts, provider reasoning, tokens, command bodies,
+unrestricted tool arguments, or raw diagnostic output.
 
 ## Observability
 

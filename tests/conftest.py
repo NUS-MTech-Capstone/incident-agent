@@ -12,6 +12,7 @@ from incident_agent.persistence.store import IncidentStore, metadata
 from incident_agent.planning.planner import RuleBasedPlanner
 from incident_agent.planning.workflow import IncidentWorkflow
 from incident_agent.service import IncidentService
+from incident_agent.trace import IncidentTraceRecorder
 
 
 class FakeDDM(DDMClient):
@@ -73,7 +74,7 @@ def store() -> IncidentStore:
 
 
 def make_service(store: IncidentStore, ddm: FakeDDM, planner: RuleBasedPlanner) -> IncidentService:
-    workflow = IncidentWorkflow(planner, ddm, 1, 4096)
+    workflow = IncidentWorkflow(planner, ddm, 1, 4096, IncidentTraceRecorder(store))
     return IncidentService(store, workflow, ddm, 1, 4096, task_runner=lambda coro: coro.close())
 
 
