@@ -229,6 +229,7 @@ class IncidentService:
             await self._close_abandoned_diagnosis(incident)
             return ClaimDisposition.RETRY_BUSY
         except Exception as exc:  # noqa: BLE001 - execution failures are persisted as incident state
+            await self._close_abandoned_diagnosis(incident)
             try:
                 current = self.store.get(incident.id)
                 if current.state != IncidentState.RECOVERED:

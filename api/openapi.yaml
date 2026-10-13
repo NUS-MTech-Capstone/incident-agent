@@ -2,60 +2,84 @@ openapi: 3.1.0
 info:
   title: DenDenMushi Incident Agent Worker API
   version: 0.1.0
-  description: Internal worker health endpoints for SQS and Bedrock incident triage. Public Agentic AI APIs are served by agent-controlplane. Business endpoints require the `x-api-version: 1` header; probe and OpenAPI endpoints are exempt.
+  description: 'Internal worker health endpoints for SQS and Bedrock incident triage. Public Agentic AI APIs are
+    served by agent-controlplane. Business endpoints require the `x-api-version: 1` header; probe and OpenAPI endpoints
+    are exempt.'
 servers:
-  - url: http://localhost:8091
+- url: http://localhost:8091
+  description: Direct service address; public services are accessed through the authenticated ALB.
 paths:
   /healthz:
     get:
       summary: Liveness probe
       responses:
-        "200":
-          description: Service is running.
+        '200':
+          description: Successful response.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/HealthResponse"
+                $ref: '#/components/schemas/HealthResponse'
+      security: []
   /readyz:
     get:
       summary: Readiness probe
       responses:
-        "200":
-          description: Service dependencies are ready.
+        '200':
+          description: Successful response.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ReadyResponse"
-        "503":
-          description: Service dependency check failed.
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Dependency is not ready.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                required:
+                - detail
+      security: []
   /internal/worker/health:
     get:
       summary: Internal worker health and queue status
       responses:
-        "200":
+        '200':
           description: Safe worker health metadata for agent-controlplane.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AgentHealth"
+                $ref: '#/components/schemas/AgentHealth'
+        '400':
+          $ref: '#/components/responses/Error'
+      parameters:
+      - $ref: '#/components/parameters/APIVersion'
   /openapi.yaml:
     get:
       summary: OpenAPI specification
       responses:
-        "200":
+        '200':
           description: YAML OpenAPI document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+      security: []
 components:
   schemas:
     HealthResponse:
       type: object
-      required: [status]
       properties:
         status:
           type: string
-          example: ok
+      required:
+      - status
     ReadyResponse:
       type: object
-      required: [status]
+      required:
+      - status
       properties:
         status:
           type: string
@@ -63,11 +87,13 @@ components:
     AgentHealth:
       type: object
       required:
-        - databaseReady
-        - queueConsumerConfigured
-        - queueConsumerRunning
-        - activeIncidentCount
-        - failedIncidentCount
+      - databaseReady
+      - queueConsumerConfigured
+      - queueConsumerRunning
+      - activeIncidentCount
+      - failedIncidentCount
+      - lastAlertProcessedAt
+      - lastErrorSummary
       properties:
         databaseReady:
           type: boolean
@@ -76,12 +102,37 @@ components:
         queueConsumerRunning:
           type: boolean
         lastAlertProcessedAt:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         lastErrorSummary:
           type: string
         activeIncidentCount:
           type: integer
         failedIncidentCount:
           type: integer
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+      - error
+  responses:
+    Error:
+      description: Invalid request, authorization denial, or service failure; the HTTP status identifies the category.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  parameters:
+    APIVersion:
+      name: x-api-version
+      in: header
+      required: true
+      schema:
+        type: string
+        enum:
+        - '1'
+      description: Required on business endpoints. Missing or unsupported values return 400.

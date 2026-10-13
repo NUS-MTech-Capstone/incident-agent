@@ -31,6 +31,12 @@ class A2AProtocolError(RuntimeError):
 
 
 class A2APlanner:
+    """GoF Adapter from the local Planner contract to A2A messages and artifacts.
+
+    Domain inputs are sanitized before transport; returned artifacts are validated
+    as domain results. Protocol rejection remains distinct from availability fallback.
+    """
+
     def __init__(
         self,
         base_url: str,

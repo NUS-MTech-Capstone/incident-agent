@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -15,6 +16,7 @@ from langchain_aws import ChatBedrock
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
+from incident_agent.model_trace import TraceSink, span
 from incident_agent.models import Action, ExplanationModel, Incident, OperationResult, Plan, Priority, TriageResult
 from incident_agent.observability import emit_metric
 from incident_agent.planning.catalog import DIAGNOSTIC_OPERATIONS, REMEDIATION_OPERATIONS
@@ -22,6 +24,8 @@ from incident_agent.planning.prompt_loader import PromptLoader
 
 
 class Planner(Protocol):
+    """GoF Strategy contract shared by interchangeable triage and plan algorithms."""
+
     async def triage(self, incident: Incident) -> TriageResult: ...
 
     async def plan(self, incident: Incident, evidence: list[OperationResult]) -> Plan: ...
@@ -148,6 +152,7 @@ class OpenAIPlanner:
         max_output_tokens: int = 4096,
         aws_session: Session | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        trace_sink: TraceSink | None = None,
     ):
         self.api_key = api_key
         self.model_id = model_id
@@ -162,6 +167,7 @@ class OpenAIPlanner:
         self.max_output_tokens = max_output_tokens
         self.aws_session = aws_session or Session(region_name=self.aws_region or None)
         self.transport = transport
+        self.trace_sink = trace_sink
         if self.auth_mode == "aws_iam":
             if not gateway_url.strip() or not self.aws_region:
                 raise ValueError("AWS IAM OpenAI mode requires gateway URL and region")
@@ -202,8 +208,17 @@ class OpenAIPlanner:
             self.max_prompt_bytes,
         )
         system_prompt = _bounded(self.prompts.render("triage_system.md.j2"), self.max_prompt_bytes)
-        text = await self._invoke(system_prompt, prompt, phase="triage")
-        return _decode_triage(text)
+        with span(
+            self.trace_sink,
+            "reasoning",
+            incident_id=incident.id,
+            stage="triage",
+            model=self.model_id,
+            prompt_hashes=self.explain_model().prompt_templates,
+        ):
+            text = await self._invoke(system_prompt, prompt, phase="triage")
+            with span(self.trace_sink, "result_validation"):
+                return _decode_triage(text)
 
     async def plan(self, incident: Incident, evidence: list[OperationResult]) -> Plan:
         evidence_json = json.dumps([item.model_dump(by_alias=True) for item in evidence])
@@ -218,8 +233,17 @@ class OpenAIPlanner:
             self.max_prompt_bytes,
         )
         system_prompt = _bounded(self.prompts.render("plan_system.md.j2"), self.max_prompt_bytes)
-        text = await self._invoke(system_prompt, prompt, phase="plan")
-        return Plan.model_validate_json(_strip_fence(text))
+        with span(
+            self.trace_sink,
+            "reasoning",
+            incident_id=incident.id,
+            stage="plan",
+            model=self.model_id,
+            prompt_hashes=self.explain_model().prompt_templates,
+        ):
+            text = await self._invoke(system_prompt, prompt, phase="plan")
+            with span(self.trace_sink, "result_validation"):
+                return Plan.model_validate_json(_strip_fence(text))
 
     async def _invoke(self, system_prompt: str, prompt: str, phase: str) -> str:
         last_error: Exception | None = None
@@ -247,23 +271,30 @@ class OpenAIPlanner:
         for attempt in range(1, self.transient_retry_attempts + 1):
             started = time.monotonic()
             try:
-                headers = self._request_headers(body)
-                async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
-                    response = await client.post(self.endpoint, headers=headers, content=body)
-                    response.raise_for_status()
-                response_data = response.json()
-                duration_ms = (time.monotonic() - started) * 1000
-                emit_metric(
-                    "OpenAIRequestLatencyMs",
-                    duration_ms,
-                    "Milliseconds",
-                    phase=phase,
-                    provider="openai",
-                    model=self.model_id,
-                    gatewayRoute=self.route if self.auth_mode == "aws_iam" else "direct",
-                )
-                _emit_openai_token_metrics(response_data, phase)
-                return _extract_openai_text(response_data)
+                with span(self.trace_sink, "provider_attempt", attempt=attempt, stage=phase) as attempt_span:
+                    headers = self._request_headers(body)
+                    async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
+                        response = await client.post(self.endpoint, headers=headers, content=body)
+                        response.raise_for_status()
+                    response_data = response.json()
+                    duration_ms = (time.monotonic() - started) * 1000
+                    emit_metric(
+                        "OpenAIRequestLatencyMs",
+                        duration_ms,
+                        "Milliseconds",
+                        phase=phase,
+                        provider="openai",
+                        model=self.model_id,
+                        gatewayRoute=self.route if self.auth_mode == "aws_iam" else "direct",
+                    )
+                    _emit_openai_token_metrics(response_data, phase)
+                    usage = response_data.get("usage") or {}
+                    attempt_span.update(
+                        returned_model=response_data.get("model"),
+                        input_tokens=usage.get("input_tokens"),
+                        output_tokens=usage.get("output_tokens"),
+                    )
+                    return _extract_openai_text(response_data)
             except Exception as exc:  # noqa: BLE001 - provider/API exceptions vary
                 last_error = exc
                 error_kind = _openai_error_kind(exc)
@@ -278,6 +309,16 @@ class OpenAIPlanner:
                 )
                 if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
                     emit_metric("AgentCoreGatewayThrottles", 1, phase=phase, provider="openai")
+                if isinstance(exc, httpx.HTTPStatusError):
+                    status = exc.response.status_code
+                    if status not in {408, 429} and not 500 <= status < 600:
+                        raise ValueError(f"OpenAI request rejected during {phase} (HTTP{status})") from None
+                elif not isinstance(exc, httpx.TransportError) or isinstance(
+                    exc, httpx.UnsupportedProtocol | httpx.LocalProtocolError
+                ):
+                    # Invalid output, credentials and configuration are not availability
+                    # failures. Do not turn them into apparently successful rule fallback.
+                    raise
                 if attempt >= self.transient_retry_attempts:
                     raise OpenAIInvocationError(f"OpenAI invocation failed during {phase} ({error_kind})") from exc
                 await asyncio.sleep(0.1 * attempt)
@@ -317,14 +358,30 @@ class FallbackPlanner:
             return await self.primary.triage(incident)
         except ProviderInvocationError as exc:
             emit_metric("ProviderFallbacks", 1, phase="triage", provider=exc.provider)
-            return await self.fallback.triage(incident)
+            with span(
+                getattr(self.primary, "trace_sink", None),
+                "deterministic_fallback",
+                incident_id=incident.id,
+                stage="triage",
+                fallback=True,
+                outcome="fallback",
+            ):
+                return await self.fallback.triage(incident)
 
     async def plan(self, incident: Incident, evidence: list[OperationResult]) -> Plan:
         try:
             return await self.primary.plan(incident, evidence)
         except ProviderInvocationError as exc:
             emit_metric("ProviderFallbacks", 1, phase="plan", provider=exc.provider)
-            return await self.fallback.plan(incident, evidence)
+            with span(
+                getattr(self.primary, "trace_sink", None),
+                "deterministic_fallback",
+                incident_id=incident.id,
+                stage="plan",
+                fallback=True,
+                outcome="fallback",
+            ):
+                return await self.fallback.plan(incident, evidence)
 
 
 class RuleBasedPlanner:
@@ -353,20 +410,22 @@ class RuleBasedPlanner:
         )
 
     async def plan(self, incident: Incident, evidence: list[OperationResult]) -> Plan:
-        combined = "\n".join(f"{item.stdout}\n{item.stderr}".lower() for item in evidence)
         service_status = "\n".join(
-            f"{item.stdout}\n{item.stderr}".lower() for item in evidence if item.operation_id == "service_status"
+            item.stdout.lower() for item in evidence if item.operation_id == "service_status" and item.exit_code >= 0
         )
         health_check = "\n".join(
-            f"{item.stdout}\n{item.stderr}".lower() for item in evidence if item.operation_id == "health_check"
+            item.stdout.lower() for item in evidence if item.operation_id == "health_check" and item.exit_code >= 0
         )
-        if "unhealthy" in health_check and "active" in service_status:
+        unhealthy = bool(re.search(r"\bunhealthy\b", health_check))
+        inactive = bool(re.search(r"\b(inactive|failed)\b", service_status))
+        active = bool(re.search(r"\bactive\b", service_status)) and not inactive
+        if unhealthy and active:
             return Plan(
                 summary="Demo app is active but unhealthy; request approval to recover the demo app.",
                 rationale="Diagnostics show the service is active while the health endpoint reports unhealthy.",
                 actions=[Action(operationId="recover_demo_app", reason="Demo app health check failed.")],
             )
-        if "failed" in combined or "inactive" in combined or "unhealthy" in combined:
+        if inactive or unhealthy:
             return Plan(
                 summary="Service appears unhealthy; request approval to restart the managed service.",
                 rationale="Diagnostics include unhealthy service indicators.",
