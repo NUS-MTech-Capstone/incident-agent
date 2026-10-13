@@ -55,6 +55,7 @@ artifacts = ["src/incident_agent/py.typed"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "prompts" = "prompts"
+"api/openapi.yaml" = "incident_agent/openapi.yaml"
 
 [tool.hatch.build.targets.sdist.force-include]
 "prompts" = "prompts"

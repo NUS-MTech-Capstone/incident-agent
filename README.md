@@ -617,3 +617,8 @@ The Image workflow runs only after successful CI for a push to `main`. It builds
 the tested source SHA, retains that SHA as a traceability tag, and promotes the
 build's `sha256` digest through a Kubernetes PR. Promotion requires the digest;
 Argo CD deploys that immutable reference after the GitOps PR is merged.
+
+The installed wheel includes the exact checked-in `api/openapi.yaml` as a
+package resource. `/openapi.yaml` is version-exempt in both editable checkouts
+and the deployed non-editable image. Contract tests also build and load a wheel
+from a separate directory to detect packaging drift.

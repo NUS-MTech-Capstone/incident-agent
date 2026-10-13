@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -8,6 +13,7 @@ import jsonschema
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from hatchling.build import build_wheel
 
 from incident_agent.api.web import create_app
 from incident_agent.models import Plan
@@ -15,6 +21,38 @@ from incident_agent.persistence.store import IncidentStore
 from tests.conftest import FakeDDM, StaticPlanner, make_service
 
 SPEC_PATH = Path(__file__).resolve().parents[1] / "api/openapi.yaml"
+
+
+def test_installed_wheel_serves_its_exact_packaged_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(SPEC_PATH.parents[1])
+    wheel = Path(tmp_path, build_wheel(str(tmp_path)))
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(wheel) as archive:
+        archive.extractall(installed)
+    script = """
+import hashlib, os
+from pathlib import Path
+import incident_agent
+from fastapi.testclient import TestClient
+from incident_agent.api.web import create_app
+assert Path(incident_agent.__file__).is_relative_to(Path(os.environ['PYTHONPATH']))
+response = TestClient(create_app(None)).get('/openapi.yaml')
+assert response.status_code == 200
+assert hashlib.sha256(response.content).hexdigest() == os.environ['EXPECTED_SPEC_SHA256']
+"""
+    subprocess.run(  # noqa: S603 - our fixed script and freshly built local wheel
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(installed),
+            "EXPECTED_SPEC_SHA256": hashlib.sha256(SPEC_PATH.read_bytes()).hexdigest(),
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
 
 
 def assert_response(path: str, status: int, payload: Any) -> None:

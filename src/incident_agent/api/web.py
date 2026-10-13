@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from importlib.resources import files
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -59,8 +60,14 @@ def create_app(service: IncidentService) -> FastAPI:
 
     @app.get("/openapi.yaml")
     async def openapi_yaml() -> Response:
-        path = Path(__file__).resolve().parents[3] / "api" / "openapi.yaml"
-        return Response(path.read_text(encoding="utf-8"), media_type="application/yaml; charset=utf-8")
+        packaged = files("incident_agent").joinpath("openapi.yaml")
+        # Wheels carry their own contract; editable checkouts use the owning API file.
+        content = (
+            packaged.read_bytes()
+            if packaged.is_file()
+            else (Path(__file__).resolve().parents[3] / "api" / "openapi.yaml").read_bytes()
+        )
+        return Response(content, media_type="application/yaml; charset=utf-8")
 
     return app
 
