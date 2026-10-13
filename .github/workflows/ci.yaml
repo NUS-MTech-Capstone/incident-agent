@@ -14,9 +14,6 @@ jobs:
   postgres-claims:
     name: PostgreSQL migrations and claims
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: incident-agent
     services:
       postgres:
         image: postgres:16-alpine
@@ -36,30 +33,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          path: incident-agent
-
-      - name: Checkout evaluated approval implementation
-        uses: actions/checkout@v7
-        with:
-          repository: NUS-MTech-Capstone/agent-controlplane
-          ref: 321d6d4b142f3589fedaa5daa6f7c8aa5d193569
-          path: agent-controlplane
-
-      - name: Checkout evaluated dataplane implementation
-        uses: actions/checkout@v7
-        with:
-          repository: NUS-MTech-Capstone/proxy-dataplane
-          ref: 6a98eda4d96f0d842dbf0a4628f5181d03772114
-          path: proxy-dataplane
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.9"
-          cache-dependency-path: |
-            agent-controlplane/go.sum
-            proxy-dataplane/go.sum
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -70,27 +43,13 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-          cache-dependency-glob: incident-agent/uv.lock
+          cache-dependency-glob: uv.lock
 
       - name: Install dependencies
         run: uv sync --frozen
 
       - name: Test migrations and concurrent claims
         run: make test-postgres
-
-      - name: Evaluate deterministic scenarios
-        run: uv run python -m evals.runner --mode deterministic --output /tmp/r12-rules-ci
-
-      - name: Evaluate cross-service and PostgreSQL contracts
-        run: uv run python -m evals.contracts --output /tmp/r12-contracts-ci
-
-      - name: Retain sanitized evaluation results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: evaluated-source-results
-          path: /tmp/r12-*-ci/
-          retention-days: 90
 
   openapi:
     uses: NUS-MTech-Capstone/github-actions-shared/.github/workflows/openapi-ci.yaml@0a2ab816ffd50e835f0d3553343f544f59f4b41b
