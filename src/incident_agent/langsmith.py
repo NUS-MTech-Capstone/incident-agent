@@ -37,6 +37,8 @@ def configure_langsmith(settings: Settings, fetch_secret: SecretFetcher | None =
         logger.warning("LangSmith tracing requested but no API key was configured; tracing disabled")
         return
 
+    os.environ["LANGSMITH_HIDE_INPUTS"] = "true"
+    os.environ["LANGSMITH_HIDE_OUTPUTS"] = "true"
     os.environ["LANGSMITH_TRACING"] = "true"
     os.environ["LANGSMITH_API_KEY"] = api_key
     _set_optional("LANGSMITH_PROJECT", settings.langsmith_project)

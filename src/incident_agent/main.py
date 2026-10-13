@@ -15,6 +15,7 @@ from incident_agent.config import Settings, load_settings
 from incident_agent.identity import WorkloadIdentityClient
 from incident_agent.ingest.sqs import SQSConsumer
 from incident_agent.langsmith import configure_langsmith
+from incident_agent.model_trace import TraceSink, create_trace_sink
 from incident_agent.observability import configure_logging
 from incident_agent.persistence.store import IncidentStore
 from incident_agent.planning.a2a_client import A2APlanner
@@ -25,7 +26,7 @@ from incident_agent.tool_gateway import GatewayBackend, GatewayPolicy, create_to
 from incident_agent.trace import IncidentTraceRecorder
 
 ALLOWED_BEDROCK_MODEL_IDS = {"global.amazon.nova-2-lite-v1:0"}
-ALLOWED_OPENAI_MODEL_IDS = {"gpt-5.5", "gpt-5.4-2026-03-05"}
+ALLOWED_OPENAI_MODEL_IDS = {"gpt-5.5", "gpt-5.5-2026-04-23", "gpt-5.4-2026-03-05"}
 
 
 def _database_url_from_secret(secret_id: str, region_name: str) -> str:
@@ -87,7 +88,9 @@ def build_service() -> IncidentService:
     )
 
 
-def _build_planner(settings: Settings) -> BedrockPlanner | FallbackPlanner | OpenAIPlanner | RuleBasedPlanner:
+def _build_planner(
+    settings: Settings, trace_sink: TraceSink | None = None
+) -> BedrockPlanner | FallbackPlanner | OpenAIPlanner | RuleBasedPlanner:
     mode = settings.planner_mode.strip().lower()
     if mode == "rule_based":
         return RuleBasedPlanner()
@@ -112,6 +115,7 @@ def _build_planner(settings: Settings) -> BedrockPlanner | FallbackPlanner | Ope
             aws_region=settings.openai_aws_region or settings.aws_region,
             reasoning_effort=settings.openai_reasoning_effort,
             max_output_tokens=settings.openai_max_output_tokens,
+            trace_sink=trace_sink,
         )
         if mode == "openai":
             return openai_planner
@@ -167,12 +171,16 @@ def create_reasoning_runtime_app() -> FastAPI:
     settings = load_settings()
     configure_logging(settings.log_format)
     configure_langsmith(settings)
-    planner = _build_planner(settings)
-    return create_reasoning_app(
+    sink = create_trace_sink()
+    planner = _build_planner(settings, sink)
+    app = create_reasoning_app(
         planner,
         WorkloadIdentityClient(settings.sts_url, settings.http_timeout_seconds),
         settings.reasoning_agent_url,
     )
+    if sink is not None:
+        app.router.add_event_handler("shutdown", sink.close)
+    return app
 
 
 def create_tool_gateway_runtime_app() -> Any:

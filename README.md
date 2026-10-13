@@ -238,12 +238,34 @@ Claim lifecycle signals are `IncidentClaimContended`,
 `IncidentClaimReclaimed`, and `IncidentClaimLost`; SQS heartbeat failures emit
 `SQSVisibilityExtensionFailures` without adding high-cardinality dimensions.
 
-LangSmith can be enabled for local or staging prompt debugging with
+LangSmith can be enabled for local or staging metadata tracing with
 `LANGSMITH_TRACING=true`; the dev Kubernetes overlay wires the API key only to
-the Reasoning Agent through AWS Secrets Manager. Production keeps it disabled. Bedrock invocation logging
+the Reasoning Agent through AWS Secrets Manager. The OpenAI planner explicitly
+traces each triage/plan stage, provider attempt and schema validation; a
+deterministic fallback is a separate trace correlated by incident ID and stage.
+Only allowlisted identifiers, model IDs, prompt-template hashes, duration,
+usage and outcomes are exported. Inputs and outputs are empty; raw prompts,
+evidence, responses, headers and exceptions are excluded. SDK runtime-environment
+capture is disabled. LangSmith adds its own trace-depth metadata.
+
+The optional exporter has a 128-span queue, one daemon worker, no retries,
+1-second connection / 2-second read timeouts and a 5-second shutdown join.
+Missing/unreadable credentials disable tracing. Export failures and a full queue
+discard telemetry without changing model results, fallback decisions or approval
+requirements. This is best-effort observability: application audit events remain
+the record for A2A, diagnostics, review, approval, execution and verification.
+`LANGSMITH_HIDE_INPUTS` and `LANGSMITH_HIDE_OUTPUTS` are set when enabled.
+Production keeps tracing disabled. Bedrock invocation logging
 and OpenTelemetry/X-Ray tracing should also remain disabled by default because
 they can retain sensitive prompt or evidence data; enable them only for short,
 explicit debug windows.
+
+R10's controlled replay verified two roots / six spans in the dev project on
+7 October 2026, with empty exported inputs/outputs and unchanged 14-day base
+retention. This verified local Reasoning Agent code through the configured
+IAM-authenticated AgentCore route; it did not deploy the changes or execute
+remediation. Screenshots and readback evidence are in
+`../documentation/R10_R16_MODEL_EVIDENCE.md`.
 
 SQS failures are left for normal queue redelivery and DLQ handling. Inspect the
 Terraform-created DLQ when `SQSMessageFailures` alarms, fix the parser or
@@ -347,6 +369,94 @@ attempts are retained as sanitized metadata, including successful decisions,
 manager/admin authorization failures, stale plan hashes, missing incidents, and
 expired plans.
 
+## GoF Design Patterns
+
+Two existing implementations demonstrate patterns from the Gang of Four catalogue.
+The pattern names describe current code; they do not introduce new runtime behavior.
+
+### Strategy — interchangeable incident planners
+
+`Planner` in `src/incident_agent/planning/planner.py` is the strategy contract:
+`triage(Incident) -> TriageResult` and
+`plan(Incident, list[OperationResult]) -> Plan` are asynchronous operations.
+`TriageAgent` and `ActionPlanAgent` are the contexts: they receive a planner by
+constructor injection and delegate to it. `IncidentWorkflow` wires these contexts.
+`RuleBasedPlanner`, `OpenAIPlanner`, and `BedrockPlanner` supply different algorithms
+behind the same interface. Python structural typing provides the contract without
+requiring each implementation to inherit from `Planner`.
+
+```mermaid
+classDiagram
+    class Planner {
+        <<Protocol>>
+        triage(incident) TriageResult
+        plan(incident, evidence) Plan
+    }
+    TriageAgent --> Planner : delegates triage
+    ActionPlanAgent --> Planner : delegates plan
+    Planner <|.. RuleBasedPlanner
+    Planner <|.. OpenAIPlanner
+    Planner <|.. BedrockPlanner
+```
+
+The composition code in `main.py::_build_planner` selects the reasoning-service
+implementation from reviewed configuration. The coordinator separately injects
+`A2APlanner`, described below. This is startup selection, not an autonomous model
+router. `FallbackPlanner` composes a primary and fallback planner and catches
+provider invocation failures; invalid structured output and policy rejection do
+not become permission to bypass review.
+
+The benefit is that workflow code and tests can use a different planning algorithm
+without duplicating the workflow. The cost is maintaining common result schemas
+and handling provider-specific failures; interchangeable interfaces do not imply
+equal diagnosis quality, latency, or cost. Every candidate plan still goes through
+the deterministic reviewer and exact-plan human approval before mutation.
+
+### Adapter — local planner calls over A2A
+
+`A2APlanner` in `src/incident_agent/planning/a2a_client.py` is an object adapter.
+Its target interface is `Planner`; the adapted interface is the A2A SDK client and
+the remote reasoning service's message/task/artifact protocol. The workflow calls
+ordinary domain methods without handling discovery, JSON-RPC or streamed artifacts.
+
+```mermaid
+classDiagram
+    class Planner {
+        <<Protocol>>
+        triage(incident) TriageResult
+        plan(incident, evidence) Plan
+    }
+    IncidentWorkflow --> Planner : injected dependency
+    Planner <|.. A2APlanner
+    A2APlanner --> A2AClient : creates and calls
+    A2AClient --> ReasoningService : messages and task artifacts
+```
+
+For example, `A2APlanner.triage` sanitizes an incident, adds `stage="triage"`, and
+uses `_send` to construct a `SendMessageRequest` containing a data message. `_send`
+uses authenticated discovery, reads task/artifact/status events and converts a
+structured artifact into a dictionary. `triage` validates it as `TriageResult`;
+`plan` similarly returns a validated `Plan`. The client is closed in a `finally`
+block. Availability failure may select the injected rule fallback, while rejected
+tasks, wrong identity and invalid results remain failures.
+
+The interface conversion makes this an Adapter: it is more than a same-interface
+remote forwarding proxy. It also participates in the Strategy contract, but the
+two patterns solve different problems: choosing an algorithm versus translating
+an incompatible protocol. The benefit is isolating transport details from domain
+workflow code. The cost is serialization, network latency, SDK compatibility work
+and error classification; the adapter is not the authorization authority.
+
+### Existing verification
+
+`tests/test_main.py` checks configuration-based strategy construction and reviewed
+model restrictions. `tests/test_rule_based_planner.py` and
+`tests/test_planner_prompts.py` exercise deterministic results, provider payloads
+and bounded fallback with fakes. `tests/test_a2a_protocol.py` checks authenticated
+structured handoff, wrong-identity denial, availability-only fallback and sanitized
+payloads using an in-process app and mocked transport. These are local contract
+tests, not measured LLM accuracy or proof of a live deployment.
+
 ## Development
 
 The Python import namespace remains `incident_agent`, with implementation
@@ -405,8 +515,90 @@ uv run incident-agent
 
 ## Evaluation Baseline
 
-`evals/fixtures/baseline.json` contains deterministic incident examples used by
-`pytest`. The baseline checks classification, schema validity, supported tool
-selection, prompt-injection resistance, and approval gating. LangSmith tracing
-and managed evaluation can be enabled later with environment variables, but CI
-must pass without LangSmith credentials.
+The original three fixtures remain regression tests. R12 adds a versioned
+12-scenario corpus in `evals/fixtures/six_role_v1.json`, 25 Python role/category
+cases, and five matching Go Agent Control Plane executor cases. Boundary tests
+cover A2A/MCP authorization, real local Postgres claims/fencing, provider
+failures, and dataplane ownership. Ordinary `pytest` never invokes an LLM.
+
+Run from this repository, choosing a **new** output directory each time:
+
+```bash
+uv run python -m evals.runner --mode deterministic --output /tmp/r12-rules-001
+INCIDENT_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/r12 \
+  uv run python -m evals.contracts --output /tmp/r12-contracts-001
+uv run python -m evals.runner --mode gateway --repetitions 3 \
+  --aws-profile capstone --output /tmp/r12-gateway-001
+```
+
+The contract runner requires the sibling `agent-controlplane` and
+`proxy-dataplane` checkouts and Go. Use only a disposable local database;
+migration tests are destructive to that test database. Missing or skipped
+dependencies are recorded as blocked, not passed. The corpus has fixed
+engineering expectations, not human ground-truth labels or judge scores.
+
+Gateway mode is opt-in. It uses the production IAM-signing planner and the
+existing `openai/gpt-5.4-2026-03-05` AgentCore route, with synthetic incident
+data and simulated tools. `OPENAI_GATEWAY_URL` may specify the gateway; otherwise
+the runner reads its non-secret URL from the dev overlay. No API key is read.
+Runs disable LangSmith tracing, use one concurrent call, at least 10.1 seconds
+between HTTP attempts, a 60-second timeout, two attempts per stage, and a
+144-attempt ceiling. Authentication/configuration failures stop the campaign.
+Use `--cases R12-S01,R12-S07` only for explicitly labelled partial reruns.
+
+Artifacts contain source/corpus/prompt/catalog hashes, revisions and dirty
+state, sanitized expected/actual outputs, verdicts, per-stage fallback and
+attempt counts. They exclude transport headers, raw provider envelopes and
+terminal streams. Stage durations include request pacing; they are not model
+latency benchmarks. Output directories cannot be reused. A gateway campaign
+with fallback is not reported as a complete primary-model campaign.
+
+Measured on 7 October 2026: 72/72 gateway stages passed across 12 scenarios and
+three repetitions, with no fallback; the corrected rule baseline passed 24/24.
+All 30 role/category cases passed. Full results, initial failures and source
+manifests are in `../documentation/R12_SIX_ROLE_EVALUATION.md`.
+
+R12 regression fixes keep fallback conservative: whole-word service state
+matching distinguishes `inactive` from `active`; only current `service_status`
+and `health_check` stdout with non-transport-failure exit codes can justify a
+rule-based repair. General logs and diagnostic transport errors cannot trigger
+one. OpenAI authorization/configuration errors and malformed responses fail
+without retry/fallback; transient HTTP 408/429/5xx and transport failures retain
+bounded fallback. Failed diagnosis closes its automation run best-effort before
+propagating the failure; run TTL remains the fallback if close is unavailable.
+
+### R16 small model comparison
+
+Run the frozen ten-case pilot through the configured IAM gateway:
+
+```bash
+PYTHONPATH=src uv run python -m evals.model_comparison \
+  --aws-profile capstone --trace-evidence \
+  --output ../documentation/evidence/r10-r16/NEW-RUN-ID
+```
+
+Use a new output directory. The runner refuses to overwrite an earlier run.
+The configuration pins `gpt-5.4-2026-03-05` and `gpt-5.5-2026-04-23`; each gets
+20 sequential calls (ten cases × triage/plan), low reasoning, 4,096 output tokens,
+60-second timeout and at least 10.1 seconds between request starts. Scored runs
+have one attempt and no fallback. The rules baseline runs separately without
+provider calls. Mocked outage tests verify fallback separately.
+
+Each request reserves a conservative maximum list-price estimate on disk before
+sending. Known usage reconciles the reservation; timeouts, HTTP errors and missing
+usage retain it. The hard USD5 ceiling includes traced comparison calls. This is
+a per-campaign ceiling: do not launch simultaneous or additional campaigns against
+a shared spending allowance. Refresh `PRICES` and official model-page references
+before a new live campaign; complimentary usage is not assumed.
+
+`--trace-evidence` reads the existing dev Secrets Manager reference in
+`ap-southeast-1`, checks visible current-month root counts, and traces only the
+two GPT-5.4 R12-S01 stages (six spans). Also check the billing UI for deleted or
+not-yet-indexed usage. The runner does not upgrade retention, run hosted evaluators,
+create annotation queues or submit more than two roots. Without this flag it
+disables tracing. Results include sanitized structured outputs, expected verdicts,
+failures, usage, latency, model IDs, source hashes and a durable budget ledger.
+
+The 7 October pilot cost an estimated USD0.1417725 across 40 successful calls.
+See `../documentation/R10_R16_MODEL_EVIDENCE.md` for the compact comparison,
+representative disagreement, caveats and reproduction evidence.
