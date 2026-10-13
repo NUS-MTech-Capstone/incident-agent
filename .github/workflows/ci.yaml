@@ -7,7 +7,7 @@ on:
 
 jobs:
   ci:
-    uses: NUS-MTech-Capstone/github-actions-shared/.github/workflows/python-ci.yaml@main
+    uses: NUS-MTech-Capstone/github-actions-shared/.github/workflows/python-ci.yaml@0a2ab816ffd50e835f0d3553343f544f59f4b41b
     with:
       python-version: "3.12"
 
@@ -50,3 +50,6 @@ jobs:
 
       - name: Test migrations and concurrent claims
         run: make test-postgres
+
+  openapi:
+    uses: NUS-MTech-Capstone/github-actions-shared/.github/workflows/openapi-ci.yaml@0a2ab816ffd50e835f0d3553343f544f59f4b41b
