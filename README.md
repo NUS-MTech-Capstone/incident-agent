@@ -1,19 +1,17 @@
 # Incident Agent
 
-Python LangGraph baseline for DenDenMushi incident triage, evidence gathering,
+Python LangGraph service for DenDenMushi incident triage, evidence gathering,
 approval-gated action planning, and constrained remediation.
 
-This is the first concrete Phase 2 AI-agent baseline. It is intentionally
-bounded: the model can classify, summarize evidence, and propose a structured
-plan, but authority to mutate infrastructure or target hosts remains outside
-the model and behind explicit validation plus human approval.
+Models classify incidents, summarize evidence and propose structured plans.
+Deterministic validation and human approval authorize bounded remediation.
 
 The coordinator consumes managed-server CloudWatch alarm notifications from
 SQS, delegates structured triage and planning to a private Reasoning Agent over
 A2A, gathers bounded diagnostics through a private MCP Tool Gateway, and stores
 sanitized alert and incident metadata in Postgres. The Go
-`agent-controlplane` exposes Cognito-protected approval pages plus JSON
-endpoints for the Angular Agentic AI UI.
+`agent-controlplane` exposes Cognito-protected JSON endpoints for approval
+and the Angular Agentic AI UI.
 
 The model never receives authority to execute free-form shell commands.
 Mutating operations come from the code-reviewed v1 remediation catalog, and one
@@ -260,12 +258,8 @@ and OpenTelemetry/X-Ray tracing should also remain disabled by default because
 they can retain sensitive prompt or evidence data; enable them only for short,
 explicit debug windows.
 
-R10's controlled replay verified two roots / six spans in the dev project on
-7 October 2026, with empty exported inputs/outputs and unchanged 14-day base
-retention. This verified local Reasoning Agent code through the configured
-IAM-authenticated AgentCore route; it did not deploy the changes or execute
-remediation. Screenshots and readback evidence are in
-`../documentation/R10_R16_MODEL_EVIDENCE.md`.
+Model tracing and comparison results are supplied separately in
+`capstone/documentation/R10_R16_MODEL_EVIDENCE.md`.
 
 SQS failures are left for normal queue redelivery and DLQ handling. Inspect the
 Terraform-created DLQ when `SQSMessageFailures` alarms, fix the parser or
@@ -297,10 +291,6 @@ when another worker owns the claim, shortens that message's visibility to the
 configured claim-renew interval without acknowledging it. Managed-server `OK`
 alerts clear any diagnosis claim, recover matching active incidents, and
 record recovery timeline metadata.
-
-This ownership path intentionally does not use a vector store. Embedding
-similarity is not a concurrency primitive and cross-incident model memory is
-outside the current bounded-agent scope.
 
 Alert statuses:
 
@@ -406,11 +396,9 @@ router. `FallbackPlanner` composes a primary and fallback planner and catches
 provider invocation failures; invalid structured output and policy rejection do
 not become permission to bypass review.
 
-The benefit is that workflow code and tests can use a different planning algorithm
-without duplicating the workflow. The cost is maintaining common result schemas
-and handling provider-specific failures; interchangeable interfaces do not imply
-equal diagnosis quality, latency, or cost. Every candidate plan still goes through
-the deterministic reviewer and exact-plan human approval before mutation.
+Workflow code and tests can select a planner through a common result contract.
+Every candidate plan passes deterministic review and exact-plan human approval
+before mutation.
 
 ### Adapter — local planner calls over A2A
 
@@ -440,12 +428,8 @@ structured artifact into a dictionary. `triage` validates it as `TriageResult`;
 block. Availability failure may select the injected rule fallback, while rejected
 tasks, wrong identity and invalid results remain failures.
 
-The interface conversion makes this an Adapter: it is more than a same-interface
-remote forwarding proxy. It also participates in the Strategy contract, but the
-two patterns solve different problems: choosing an algorithm versus translating
-an incompatible protocol. The benefit is isolating transport details from domain
-workflow code. The cost is serialization, network latency, SDK compatibility work
-and error classification; the adapter is not the authorization authority.
+The Adapter isolates A2A transport and protocol conversion from domain workflow
+code, while Strategy selects the planning implementation.
 
 ### Existing verification
 
@@ -454,8 +438,7 @@ model restrictions. `tests/test_rule_based_planner.py` and
 `tests/test_planner_prompts.py` exercise deterministic results, provider payloads
 and bounded fallback with fakes. `tests/test_a2a_protocol.py` checks authenticated
 structured handoff, wrong-identity denial, availability-only fallback and sanitized
-payloads using an in-process app and mocked transport. These are local contract
-tests, not measured LLM accuracy or proof of a live deployment.
+payloads using an in-process app and mocked transport.
 
 ## Development
 
@@ -508,20 +491,20 @@ fail closed without logging database URLs, row values, or group keys.
 Run locally with a direct database URL and SQS disabled:
 
 ```bash
-DATABASE_URL=sqlite:///./incident-agent.db \
-ENABLE_SQS_CONSUMER=false \
+export DATABASE_URL=sqlite:///./incident-agent.db
+export ENABLE_SQS_CONSUMER=false
+uv run python -m incident_agent.migrate
 uv run incident-agent
 ```
 
-## Evaluation Baseline
+## Evaluations
 
-The original three fixtures remain regression tests. R12 adds a versioned
-12-scenario corpus in `evals/fixtures/six_role_v1.json`, 25 Python role/category
-cases, and five matching Go Agent Control Plane executor cases. Boundary tests
-cover A2A/MCP authorization, real local Postgres claims/fencing, provider
-failures, and dataplane ownership. Ordinary `pytest` never invokes an LLM.
+The versioned corpus in `evals/fixtures/six_role_v1.json` contains 12 synthetic
+scenarios with fixed engineering expectations. Evaluations cover 25 Python
+role/category cases and five Go Agent Control Plane executor cases, plus
+A2A/MCP authorization, Postgres claims, provider handling and dataplane ownership.
 
-Run from this repository, choosing a **new** output directory each time:
+Choose a new output directory for every run:
 
 ```bash
 uv run python -m evals.runner --mode deterministic --output /tmp/r12-rules-001
@@ -531,45 +514,24 @@ uv run python -m evals.runner --mode gateway --repetitions 3 \
   --aws-profile capstone --output /tmp/r12-gateway-001
 ```
 
-The contract runner requires the sibling `agent-controlplane` and
-`proxy-dataplane` checkouts and Go. Use only a disposable local database;
-migration tests are destructive to that test database. Missing or skipped
-dependencies are recorded as blocked, not passed. The corpus has fixed
-engineering expectations, not human ground-truth labels or judge scores.
+Contract tests require Go, sibling `agent-controlplane` and `proxy-dataplane`
+checkouts, and a disposable local Postgres database. Migration tests reset that
+test database. Ordinary `pytest` uses local fixtures; gateway mode is opt-in and
+uses synthetic incident data and simulated tools through the IAM-authenticated
+AgentCore route. Provider requests are sequential, paced and bounded by timeouts
+and attempt limits. Saved results include source/corpus hashes, verdicts,
+attempts and fallback metadata.
 
-Gateway mode is opt-in. It uses the production IAM-signing planner and the
-existing `openai/gpt-5.4-2026-03-05` AgentCore route, with synthetic incident
-data and simulated tools. `OPENAI_GATEWAY_URL` may specify the gateway; otherwise
-the runner reads its non-secret URL from the dev overlay. No API key is read.
-Runs disable LangSmith tracing, use one concurrent call, at least 10.1 seconds
-between HTTP attempts, a 60-second timeout, two attempts per stage, and a
-144-attempt ceiling. Authentication/configuration failures stop the campaign.
-Use `--cases R12-S01,R12-S07` only for explicitly labelled partial reruns.
+The 7 October evaluation passed 72/72 gateway stages across 12 scenarios and
+three repetitions with no fallback, 24/24 rule-baseline stages and all 30
+role/category cases. The separately supplied workspace document
+`capstone/documentation/R12_SIX_ROLE_EVALUATION.md` contains the results and
+source manifests.
 
-Artifacts contain source/corpus/prompt/catalog hashes, revisions and dirty
-state, sanitized expected/actual outputs, verdicts, per-stage fallback and
-attempt counts. They exclude transport headers, raw provider envelopes and
-terminal streams. Stage durations include request pacing; they are not model
-latency benchmarks. Output directories cannot be reused. A gateway campaign
-with fallback is not reported as a complete primary-model campaign.
+### Model comparison
 
-Measured on 7 October 2026: 72/72 gateway stages passed across 12 scenarios and
-three repetitions, with no fallback; the corrected rule baseline passed 24/24.
-All 30 role/category cases passed. Full results, initial failures and source
-manifests are in `../documentation/R12_SIX_ROLE_EVALUATION.md`.
-
-R12 regression fixes keep fallback conservative: whole-word service state
-matching distinguishes `inactive` from `active`; only current `service_status`
-and `health_check` stdout with non-transport-failure exit codes can justify a
-rule-based repair. General logs and diagnostic transport errors cannot trigger
-one. OpenAI authorization/configuration errors and malformed responses fail
-without retry/fallback; transient HTTP 408/429/5xx and transport failures retain
-bounded fallback. Failed diagnosis closes its automation run best-effort before
-propagating the failure; run TTL remains the fallback if close is unavailable.
-
-### R16 small model comparison
-
-Run the frozen ten-case pilot through the configured IAM gateway:
+The ten-case pilot compares pinned GPT-5.4 and GPT-5.5 models through the same
+IAM gateway, with a separate rules baseline:
 
 ```bash
 PYTHONPATH=src uv run python -m evals.model_comparison \
@@ -577,46 +539,25 @@ PYTHONPATH=src uv run python -m evals.model_comparison \
   --output ../documentation/evidence/r10-r16/NEW-RUN-ID
 ```
 
-Use a new output directory. The runner refuses to overwrite an earlier run.
-The configuration pins `gpt-5.4-2026-03-05` and `gpt-5.5-2026-04-23`; each gets
-20 sequential calls (ten cases × triage/plan), low reasoning, 4,096 output tokens,
-60-second timeout and at least 10.1 seconds between request starts. Scored runs
-have one attempt and no fallback. The rules baseline runs separately without
-provider calls. Mocked outage tests verify fallback separately.
+Each model receives 20 sequential calls with a 60-second timeout and at least
+10.1 seconds between starts. Scored calls use one attempt. The runner reserves
+estimated cost before each call and enforces a USD5 campaign ceiling; run one
+campaign at a time and refresh its price references before a new comparison.
+Optional trace evidence exports two roots with empty inputs and outputs.
 
-Each request reserves a conservative maximum list-price estimate on disk before
-sending. Known usage reconciles the reservation; timeouts, HTTP errors and missing
-usage retain it. The hard USD5 ceiling includes traced comparison calls. This is
-a per-campaign ceiling: do not launch simultaneous or additional campaigns against
-a shared spending allowance. Refresh `PRICES` and official model-page references
-before a new live campaign; complimentary usage is not assumed.
+The 7 October pilot completed 40 calls at an estimated USD0.1417725. Results,
+model identities and reproduction evidence are supplied in
+`capstone/documentation/R10_R16_MODEL_EVIDENCE.md`.
 
-`--trace-evidence` reads the existing dev Secrets Manager reference in
-`ap-southeast-1`, checks visible current-month root counts, and traces only the
-two GPT-5.4 R12-S01 stages (six spans). Also check the billing UI for deleted or
-not-yet-indexed usage. The runner does not upgrade retention, run hosted evaluators,
-create annotation queues or submit more than two roots. Without this flag it
-disables tracing. Results include sanitized structured outputs, expected verdicts,
-failures, usage, latency, model IDs, source hashes and a durable budget ledger.
+## API contract and CI
 
-The 7 October pilot cost an estimated USD0.1417725 across 40 successful calls.
-See `../documentation/R10_R16_MODEL_EVIDENCE.md` for the compact comparison,
-representative disagreement, caveats and reproduction evidence.
+[OpenAPI contract](api/openapi.yaml), served byte-for-byte at `GET /openapi.yaml`.
+CI validates it with `openapi-spec-validator==0.9.0`; handler tests check success,
+error and API-version responses. Update the specification alongside handler changes.
 
-## API contract verification
-
-`api/openapi.yaml` is the checked-in HTTP contract, served byte-for-byte at
-`GET /openapi.yaml`. CI validates it with `openapi-spec-validator==0.9.0`.
-Handler tests validate representative success and error responses against its
-schemas, including missing and unsupported API versions. Business HTTP calls
-require `x-api-version: 1`; the specification declares route exemptions and
-any transport-specific alternatives. Run the repository test suite when
-changing handlers or response models, and update the contract in the same PR.
-
-The Image workflow runs only after successful CI for a push to `main`. It builds
-the tested source SHA, retains that SHA as a traceability tag, and promotes the
-build's `sha256` digest through a Kubernetes PR. Promotion requires the digest;
-Argo CD deploys that immutable reference after the GitOps PR is merged.
+After successful `main` CI, the Image workflow builds the tested source SHA
+and opens a Kubernetes promotion PR with its immutable image digest. Argo CD
+deploys after that PR is merged; the commit tag provides source traceability.
 
 The installed wheel includes the exact checked-in `api/openapi.yaml` as a
 package resource. `/openapi.yaml` is version-exempt in both editable checkouts
